@@ -1,0 +1,33 @@
+# --- Data (large, public, reproducible from Kaggle CLI — never commit) ---
+data/raw/
+data/processed/
+*.zip
+
+# --- Archived provenance briefs (superseded by SPEC.md / CLAUDE.md; local-only) ---
+archive/
+
+# --- Secrets ---
+.kaggle/
+kaggle.json
+.env
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.ipynb_checkpoints/
+
+# --- Tooling ---
+.mlruns/
+mlruns/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# --- Spark / Hadoop (Windows) ---
+metastore_db/
+derby.log
+spark-warehouse/
