@@ -39,9 +39,10 @@ Granularity: **medium** — a subfeature is one coherent concept worth its own q
 - **B4** Prediction intervals — conformal (EnbPI caveat noted); quantile as alternative *(the interval is the deliverable)*
 
 ### Feature C — Causal layer
-- **C1** Intervention + control-group selection — EDA + parallel-trends check *(price cut identification; how to pick a clean control in hierarchical data)*
-- **C2** Difference-in-Differences on the price cut
-- **C3** CausalImpact (Bayesian structural TS) on SNAP — robustness cross-check
+- **C1** Intervention + control-group selection — EDA + parallel-trends check *(price cut identification; how to pick a clean control in hierarchical data)*. **Settled in EDA (`notebooks/01-eda.ipynb` §3):** treated = **`FOODS_3_697` @ `CA_3`**, price cut ~**2011-08-06** ($3.58 → $2.98, −17%); density 42.2 units/wk, 0% zero-weeks. Controls = same-store/same-dept, matched on pre-cut weekly-sales correlation (top-15, mean pre-cut corr **0.52**), price-stable within ±8 weeks of the cut. The rejection trail is kept deliberately (FOODS_3_822 = stockout at the cut; FOODS_2_227 = 96% zero-weeks) — the honest iteration is part of the narrative.
+- **C2** Difference-in-Differences on the price cut — single-intervention estimate **+ event-study (lead/lag) pre-trend evidence + effect CI + a placebo/pre-period test**. *(The eyeballed ~+60–80% lift implies elasticity ≈ −4/−5 — large; validate, don't assert.)*
+- **C2b** Scale beyond the one test case — **the "more items" plan, not a one-off.** The chosen cut is **chain-wide** (same item, same week, in CA_3/CA_1/TX_1/TX_2/CA_4): replicate the DiD across all five stores and report whether the effect holds — five agreeing estimates beat one and neutralise the thin (~26-week) pre-period. *Optional stretch:* a **panel / staggered-adoption DiD (two-way fixed effects)** across many cut events from the 632-candidate shortlist, reporting an *average* price-cut effect — the generalisable version, built only if time allows, else named in E1.
+- **C3** CausalImpact (Bayesian structural TS) on SNAP — robustness cross-check. **Reframed at runthrough:** classic CausalImpact assumes a *single, persistent onset with a clean pre-period*; SNAP is a **recurring monthly pulse present across the whole window** (no pre-period) and **store-wide** (no in-store control). So drive the counterfactual with **cross-state control series** — SNAP disbursement days differ by state, so a TX/WI store is unaffected on CA's SNAP days and is a valid predictor — and frame the estimand as the **average SNAP-day lift**, not a single-onset effect (CausalImpact/BSTS or synthetic control; keep CausalImpact for the "second named method" story). **Fallback if squeezed:** the SNAP-day coefficient from LightGBM's SNAP feature / a regression indicator — a legitimate magnitude if the full counterfactual doesn't fit the budget. The recurring-treatment caveat is written down either way.
 
 ### Feature D — Dashboard & narrative *(Streamlit)*
 - **D1** Streamlit skeleton + forecast-vs-actual + interval panel
@@ -54,6 +55,7 @@ Granularity: **medium** — a subfeature is one coherent concept worth its own q
 ### Feature E — README & positioning *(no explainer/quiz — this IS the output)*
 - **E1** README — leads with backtesting rigour, scope-control statement, data provenance, honest baseline reporting, asymmetric-cost note, **+ the "Production considerations (out of scope)" section below**
 - **E2** CV bullets mapped to JD language per role type (DS vs ML-eng)
+- **E3** Polish pass — read the README top-to-bottom as a screener would: leads with rigour (not a chart), links the artefacts (SPEC, `runthrough.md`, `study-plan.md`, the dashboard), screenshots the key panels, prunes anything that doesn't serve the anchor, and re-checks every claim survives scrutiny (esp. the Spark-honesty framing and the DiD "large effect → validated" caveat).
 
 ---
 

@@ -61,11 +61,13 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 *Living section — fill in each as it's built.*
 
 ```
-# environment      — (venv / conda activation; set at A0)
-# fetch data       — kaggle competitions download -c m5-forecasting-accuracy   (A0)
-# run tests        — (set at B1)
+# env: create/sync  — uv sync            (recreates the locked env from pyproject.toml + uv.lock)
+# env: add a dep    — uv add <pkg>       (edits pyproject.toml, resolves, installs)
+# run anything      — uv run <cmd>       (e.g. uv run python …, uv run jupyter lab)
+# fetch data        — kaggle competitions download -c m5-forecasting-accuracy   (A0)
+# run tests         — (set at B1)
 # run backtest      — (set at B1)
-# launch dashboard — (set at D1)
+# launch dashboard  — (set at D1)
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
@@ -93,5 +95,6 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 
 ## Environment
 
-- **macOS, zsh.** The whole project runs here (chosen over Windows specifically to remove the Spark-on-Windows friction).
-- Local Spark on macOS is straightforward: Java via Homebrew, no `winutils`/`HADOOP_HOME`, Unix paths throughout. A0 is still its own subfeature but should be quick.
+- **Package/env manager: uv.** One tool for the Python version, the venv, and deps. Env is defined by `pyproject.toml` + committed `uv.lock`; `uv sync` reproduces it exactly on any machine — this is what makes the Windows→macOS move deterministic. Use `uv add` to add deps, `uv run` to execute in the env (no manual activation). Set up in A0. uv manages Python only — **Java for Spark is installed separately** (see below).
+- **Target platform: macOS, zsh.** The project is intended to run here (chosen over Windows specifically to remove the Spark-on-Windows friction). Exploration/scaffolding may start on Windows; the `uv.lock` is what carries the env across.
+- Local Spark on macOS is straightforward: Java via Homebrew, no `winutils`/`HADOOP_HOME`, Unix paths throughout. A0 is still its own subfeature but should be quick. (On Windows, Spark additionally needs `winutils.exe` + `HADOOP_HOME` — the friction the macOS move avoids.)
