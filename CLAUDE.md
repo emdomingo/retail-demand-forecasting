@@ -62,12 +62,18 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 
 ```
 # env: create/sync  — uv sync            (recreates the locked env from pyproject.toml + uv.lock)
-# env: add a dep    — uv add <pkg>       (edits pyproject.toml, resolves, installs)
+# env: add a dep    — uv add <pkg>       (edits pyproject.toml, resolves, installs; --dev for tooling)
 # run anything      — uv run <cmd>       (e.g. uv run python …, uv run jupyter lab)
-# fetch data        — kaggle competitions download -c m5-forecasting-accuracy   (A0)
-# run tests         — (set at B1)
+# fetch data        — uv run python -m src.ingest.fetch_data   (A0; idempotent, --force to re-pull)
+#                     needs KAGGLE_API_TOKEN in .env (gitignored) + accepted M5 rules (else 403)
+# lint / format     — uv run ruff check . / uv run ruff format .
+# run tests         — uv run pytest       (pythonpath=. set in pyproject; testpaths=tests)
 # run backtest      — (set at B1)
 # launch dashboard  — (set at D1)
+
+# Env facts (A0): Python 3.11 (uv-managed), Java 17 (Homebrew, for the Spark JVM),
+#   PySpark 4.2, pandas pinned <3.0 (PySpark 4.2 interop). Verify Spark: it starts a
+#   local[*] SparkSession and runs a job — the true A0 gate, not just `import pyspark`.
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)

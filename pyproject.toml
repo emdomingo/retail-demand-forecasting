@@ -1,0 +1,36 @@
+[project]
+name = "retail-demand-forecasting"
+version = "0.1.0"
+description = "Portfolio-grade retail demand forecast: defensible inbound-volume forecast + honest uncertainty intervals + a causal layer explaining divergence (M5 data)."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "duckdb>=1.5.5",
+    "kaggle>=2.2.4",
+    "pandas>=2.2,<3.0",
+    "pyarrow>=25.0.1",
+    "pyspark>=4.2.0",
+    "python-dotenv>=1.2.3",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Notebooks are exploratory scratch (CLAUDE.md), not the deliverable — lint src/ + tests/.
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "jupyterlab>=4.6.3",
+    "matplotlib>=3.11.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+    "seaborn>=0.13.2",
+]
