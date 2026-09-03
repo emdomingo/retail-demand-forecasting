@@ -283,3 +283,92 @@ week-over-week `price_change_pct` value, and the grain-preservation guard. A fix
 worth remembering: all-null event columns defeat Spark's type inference
 (`CANNOT_DETERMINE_TYPE`), so the synthetic calendar/prices are built with an **explicit
 schema** rather than inferred.
+
+---
+
+## A4 — Persist partitioned Parquet feature store + downcast + read back via DuckDB
+
+**What A4 is:** the moment the pipeline becomes a *product*. A1–A3 are transformations; A4
+runs them once across all 30,490 series, writes the result to disk as a partitioned Parquet
+**feature store**, and stands up the **DuckDB query layer** that every downstream consumer
+(Feature B models, the D2 dashboard) reads from. After A4, nobody re-runs Spark to get
+features — they read a slice. This is the payoff of the whole "Spark = feature store"
+framing: build-once, subscribe-many.
+
+### The shape
+
+```
+assemble()  = melt (A1) -> add_time_features (A2) -> add_exogenous_features (A3)
+downcast()  -> tight types
+.write.partitionBy("store_id").parquet()   -> data/processed/feature_store/store_id=CA_1/…  (10 dirs)
+                                              59,181,090 rows, ~354 MB
+DuckDB  read_parquet(..., hive_partitioning=true)  ->  one store's slice, ORDER BY date
+```
+
+### Decision gate: what to persist (downcasting)
+
+At 59M rows, column *types* are a real storage and scan cost, and Spark's defaults are
+generous: counts arrive as `bigint` (8 bytes), averages as `double` (8 bytes). We measured
+the ranges first (A4 probe: `max(sales)=763`, `max(d_int)=1941`) and cast down accordingly:
+
+| columns | from → to | saving |
+|---|---|---|
+| `sales`, `lag_7/28`, `d_int`, `year` | bigint → **smallint** (int16) | 4× |
+| `wday`, `month`, `snap`, `is_event`, `has_price` | bigint → **tinyint** (int8) | 8× |
+| `rmean_7/28`, `sell_price`, `price_change_pct` | double → **float** (float32) | 2× |
+
+Downcasting only *after* verifying the ranges is the discipline — an int16 that silently
+overflows at 32,768 would be a nasty corruption, so the cast is justified by the measured
+max, not assumed. (Honest note: the store, ~354 MB, is *larger* than the 116 MB raw sales
+CSV — that's expected. The store is long-form with ~24 engineered columns; the raw CSV is a
+compact wide matrix with none of the features. Downcasting shrinks each numeric column
+2–8×; it doesn't make an enriched long store smaller than the bare input.) We also **drop
+`d`** (the string day) — `d_int` + `date` carry it — as part of "what's worth persisting."
+
+### Decision gate: partition by store_id
+
+`partitionBy("store_id")` writes 10 directories (`store_id=CA_1/…`). Because the scoped
+model works on one store, DuckDB (and Spark) read only that directory via **partition
+pruning** — the other 9 are never touched. store_id is the right key not because it's unique
+(it isn't — the row key is `(id, d_int)`) but because it's **clean, low-cardinality, and
+matches the read pattern**. Each row belongs to exactly one store, so partitions are
+balanced (~5.9M rows each) and non-overlapping.
+
+### The DuckDB query layer (`src/query/slices.py`)
+
+DuckDB owns all slice-reads and aggregations over the store — in-process, SQL, Parquet-native
+with predicate/partition pushdown. `read_store_slice(store_id)`:
+
+- **`read_parquet(path, hive_partitioning=true)`** — reads the Parquet glob and recovers
+  `store_id` from the directory names as a real column, enabling `WHERE store_id = ?` to prune.
+- **Parameterised (`?`) query** — values passed separately from SQL (injection-safe), the
+  right habit even for a local analytical DB.
+- **`ORDER BY id, date` — non-negotiable.** DuckDB does *not* guarantee row order without an
+  explicit `ORDER BY`; an unordered pull would return the 5.9M rows in arbitrary order and
+  silently scramble the very lags/rolling-means A2 built. This is the CLAUDE.md gotcha and the
+  same class of bug as the A1 `d_int` gate — so it lives in the read function itself, not in
+  each caller's discretion.
+
+### The build had to be tuned (a real systems lesson)
+
+The first build hit `java.lang.OutOfMemoryError: Java heap space` during the partitioned
+write — the window sorts + a 10-way partitioned write over 59M rows exceeded the default
+local driver heap (~1–2 GB). Fix: raise the driver heap to **8 GB** and spread the sort over
+**48 shuffle partitions** (smaller per-task memory). The one subtlety: in local mode the
+driver *is* the executor and its heap must be set **before the JVM launches**, so a builder
+`.config("spark.driver.memory", …)` is read too late — it's set via `PYSPARK_SUBMIT_ARGS`
+in `get_spark(driver_memory=…)` instead. (An earlier red herring: two builds accidentally
+running at once corrupted the overwrite; the real cause was heap, confirmed from the log.)
+
+### What's tested (`tests/test_feature_store.py`)
+
+The downcast type contract (every column lands at its intended tight type — the guard against
+a silently-widened schema) and a full **write → DuckDB read round trip**: rows written out of
+date order come back date-sorted (the ORDER BY discipline), a `TX_1` partition is pruned when
+reading `CA_1`, and `list_stores()` enumerates the partitions.
+
+### Feature A complete
+
+The pipeline now runs end-to-end: `kaggle pull → Spark melt → time features → exogenous
+joins → downcast → partitioned Parquet → DuckDB slice`. Feature B (the backtest harness and
+models) reads one store's slice through `read_store_slice` and never touches Spark again.

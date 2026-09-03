@@ -71,12 +71,19 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
 # exog demo (A3)    — uv run python -m src.ingest.exogenous  (calendar/SNAP/price joins)
+# build store (A4)  — uv run python -m src.ingest.feature_store  (full pipeline -> Parquet, ~2-3 min)
+# read slice (A4)   — uv run python -m src.query.slices  (DuckDB slice-read demo)
+#   in code: from src.query.slices import read_store_slice; df = read_store_slice("CA_3")
 # run backtest      — (set at B1)
 # launch dashboard  — (set at D1)
 
 # Env facts (A0): Python 3.11 (uv-managed), Java 17 (Homebrew, for the Spark JVM),
 #   PySpark 4.2, pandas pinned <3.0 (PySpark 4.2 interop). Verify Spark: it starts a
 #   local[*] SparkSession and runs a job — the true A0 gate, not just `import pyspark`.
+# Feature store (A4): data/processed/feature_store/ (gitignored), Parquet partitioned by
+#   store_id (10 dirs), 59.18M rows, grain = one row per (id, d_int). Downcast: sales/lags/
+#   d_int int16, flags int8, means/prices float32, wm_yr_wk stays int32. Read via DuckDB
+#   (src/query/slices.py) — always ORDER BY date. Rebuild needs 8g driver heap (get_spark).
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)

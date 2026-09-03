@@ -254,3 +254,66 @@ Answers are at the end of each subfeature's block.
 9. M5 prices are **weekly-constant**, so a 1-day lag is 0 on ~6 of 7 days and only nonzero at the
    week boundary — a noisy, mostly-dead feature. `lag(7)` compares this week's price to last
    week's (same weekday, previous `wm_yr_wk`), giving a stable week-over-week delta on every row.
+
+---
+
+## A4 — Persist Parquet feature store + downcast + DuckDB read
+
+**Recall**
+1. What does A4 produce, and why does no downstream consumer need to run Spark after it?
+2. Why is the feature store partitioned by `store_id`, and what does that buy a reader that
+   only wants one store?
+3. What is the single most important clause in every `read_store_slice` query, and what breaks
+   without it?
+
+**Predict-the-decision**
+4. Before downcasting `sales`/`lag_*` to int16, we ran a probe for `max(sales)`. Why is that
+   step non-optional?
+5. The store is ~354 MB but the raw sales CSV is ~116 MB — bigger, not smaller. Is downcasting
+   failing? Explain.
+6. `store_id` isn't unique per row (the key is `(id, d_int)`). So why is it a *good* partition
+   key, when uniqueness is what you'd want for, say, a primary key?
+
+**Spot-the-flaw**
+7. A teammate reads a series with `SELECT * FROM feature_store WHERE id = ?` (no ORDER BY),
+   then computes a fresh lag on the result. Tests pass locally. What's the latent bug?
+8. To fix an OOM, someone adds `.config("spark.driver.memory", "8g")` to the builder and reruns
+   — still OOMs. Why didn't it help, and what's the correct lever in local mode?
+9. Someone downcasts `wm_yr_wk` (values ~11101–11621) to `smallint` to "save space like the
+   others." What happens, and why was it left as `int`?
+
+---
+
+### Answers — A4
+
+1. A **partitioned Parquet feature store** (59.18M rows, 10 store partitions) plus the **DuckDB
+   query layer** over it. The features are precomputed and persisted, so consumers read a slice
+   instead of recomputing the A1–A3 pipeline — build-once, subscribe-many.
+2. The scoped model uses one store, so partitioning by `store_id` lets the reader touch only
+   that directory via **partition pruning** — the other 9 partitions are never scanned. Balanced
+   ~5.9M-row partitions, one per store.
+3. **`ORDER BY` (by id, then date).** DuckDB doesn't guarantee row order without it; an
+   unordered pull returns rows arbitrarily and silently scrambles any lag/rolling logic — the
+   same leakage-adjacent corruption as ordering by the `d` string in A1.
+4. int16 overflows above 32,767. If any series ever sold more than that in a day, the cast would
+   **silently wrap to a wrong (possibly negative) value** — data corruption with no error. The
+   probe (`max=763`) is what *justifies* the cast; downcasting on assumption is reckless.
+5. No — it's expected. The store is **long-form with ~24 engineered columns** (lags, rolling
+   means, calendar, prices); the raw CSV is a compact **wide** matrix with none of those
+   features. Downcasting shrinks each numeric column 2–8× vs default int64/double, but it can't
+   make an enriched long store smaller than the bare wide input. Different content, not a failure.
+6. A partition key wants **clean, low-cardinality grouping that matches the read pattern**, not
+   uniqueness. Every row maps to exactly one store, giving 10 balanced, non-overlapping
+   directories the reader can prune to. A unique key (millions of values) would create millions
+   of tiny partitions — the opposite of useful.
+7. The query has **no `ORDER BY`**, so DuckDB may return the series' rows in any order; the
+   freshly computed lag then reads the wrong "previous" day. It passes locally only because the
+   engine *happens* to return rows in insertion order on a small/simple read — it is not
+   guaranteed and will scramble at scale or after a different plan. Always `ORDER BY date`.
+8. In local mode the **driver is the executor**, and its heap is fixed when the JVM launches —
+   which happens on the first `getOrCreate`, *before* the builder's `spark.driver.memory` is
+   read. So the config is ignored. The correct lever is to set it **before launch** via
+   `PYSPARK_SUBMIT_ARGS` (`--driver-memory 8g`), as `get_spark(driver_memory=...)` does.
+9. `wm_yr_wk` values exceed 32,767, so a `smallint` cast **overflows and corrupts** them. It's
+   kept as `int` precisely because its range doesn't fit int16 — the same range-check reasoning
+   that permitted the other downcasts forbids this one.
