@@ -68,6 +68,8 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #                     needs KAGGLE_API_TOKEN in .env (gitignored) + accepted M5 rules (else 403)
 # lint / format     — uv run ruff check . / uv run ruff format .
 # run tests         — uv run pytest       (pythonpath=. set in pyproject; testpaths=tests)
+# melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
+# features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
 # run backtest      — (set at B1)
 # launch dashboard  — (set at D1)
 
