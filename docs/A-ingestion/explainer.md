@@ -214,3 +214,72 @@ The headline test plants a **1000-unit spike on the last day** of an otherwise-z
 and asserts every feature on that day is 0 / reads a prior day — if the frame leaked, the
 spike would show up. The rest pin the mechanics: `lag_k` reads exactly *k* days back, warm-up
 is null, and `rmean_7` at *t=10* equals `mean(days 3..9)` with day 10 excluded.
+
+---
+
+## A3 — Exogenous features in Spark: calendar/event/SNAP flags + price deltas
+
+**What A3 is:** the *outside-world* signal. A2's features come from the series' own past
+sales; A3 brings in everything the sales table doesn't know — what day it is, whether a
+holiday or SNAP-benefit day falls on it, and what the item costs. These come from the other
+two M5 tables (`calendar`, `sell_prices`) via joins.
+
+### The key reframe: leakage discipline flips for exogenous covariates
+
+A2 needed the shift discipline because its features are derived from the **target** (past
+sales), which doesn't exist yet at prediction time. A3's features are **known in advance**:
+the calendar is fixed, the SNAP schedule is published, and prices are posted before the week
+starts. So a feature at day *t* may legitimately use **day *t*'s own** calendar/SNAP/price
+value — that is *not* leakage. This is the distinction that matters under interview scrutiny:
+*the shift rule protects target-derived features, not known-ahead covariates.* The only shift
+in A3 (`price_change_pct`) is week-over-week momentum, a modelling choice, not a leak guard.
+
+### Two joins, two shapes (the Spark systems point)
+
+```
+long  --join(broadcast calendar, on=d)-->  + date, wm_yr_wk, wday/month/year, events, snap
+      --join(sell_prices, on=[store_id,item_id,wm_yr_wk])-->  + sell_price, has_price, Δprice
+```
+
+- **Calendar (~1,969 rows) is broadcast** — `F.broadcast(cal)` ships the tiny table to every
+  executor so the join happens map-side with **no shuffle**. This is the textbook
+  small-dimension join and worth naming: broadcasting the small side is the single biggest
+  join optimisation in Spark.
+- **Prices (~6.8M rows) is a normal shuffle join** — too big to broadcast, so both sides are
+  partitioned on the join key and matched. Its key, `wm_yr_wk`, only exists on the frame
+  *after* the calendar join — hence the ordering: calendar first, then prices.
+- **Both are LEFT and grain-preserving.** Calendar is unique per `d`; prices unique per
+  (store, item, week). Neither can multiply the one-row-per-series-day grain — a
+  `test_joins_preserve_row_grain` guards exactly that (a fan-out here would silently inflate
+  every downstream count).
+
+### The three feature ideas
+
+1. **SNAP, collapsed to the series' state.** Calendar carries three columns —
+   `snap_CA/TX/WI`. A series belongs to one state, so a `when(state_id==…)` chain picks the
+   right one into a single `snap` flag and the three raw columns are dropped. One meaningful
+   feature instead of three mostly-irrelevant ones — and it's exactly the signal the C3
+   causal SNAP analysis will lean on.
+2. **`has_price` — the structural-zero signal.** `sell_prices` only has a row once an item is
+   actually stocked in a store, so a **null price means "not sold here yet."** `has_price =
+   sell_price is not null` therefore distinguishes a *structural* zero (pre-launch, not a real
+   observation) from a *demand* zero (stocked but sold none) — the data-dictionary flags this
+   as the thing that disambiguates the two, and it matters for honest modelling of intermittency.
+3. **`price_change_pct` — week-over-week momentum.** Price is weekly-constant, so `lag(7)` days
+   is last week's price for that series; `(price − prev) / prev` captures promo depth /
+   direction. Not a leak (prices are known ahead), just a derived signal.
+
+### Syntax worth noting
+
+- **`F.broadcast(df)`** — a hint that forces the broadcast (map-side) join strategy.
+- **`F.when(cond, a).when(cond2, b)…`** — Spark's chained conditional; the state→SNAP pick.
+- **`col.isNotNull().cast("int")`** — boolean→0/1, how `is_event` and `has_price` are built.
+
+### What's tested (`tests/test_exogenous.py`)
+
+The SNAP collapse (a CA series sees `snap_CA`, a TX series `snap_TX` on the same day), the
+`is_event` flag, `has_price` marking an unstocked week as a structural zero, the
+week-over-week `price_change_pct` value, and the grain-preservation guard. A fixture wrinkle
+worth remembering: all-null event columns defeat Spark's type inference
+(`CANNOT_DETERMINE_TYPE`), so the synthetic calendar/prices are built with an **explicit
+schema** rather than inferred.

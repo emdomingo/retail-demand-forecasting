@@ -195,3 +195,62 @@ Answers are at the end of each subfeature's block.
 9. Without `partitionBy("id")`, the window runs over **all series as one ordered stream**, so
    the first rows of series B read the *tail of series A* as their "prior 7 days" (and B's
    early lags pull A's values). Cross-series contamination at every series boundary.
+
+---
+
+## A3 — Exogenous features: calendar/event/SNAP flags + price deltas
+
+**Recall**
+1. Which two raw tables does A3 join in, and what is the join key for each?
+2. `snap_CA`, `snap_TX`, `snap_WI` become a single `snap` column. How, and why is one flag
+   better than three here?
+3. What does `has_price` encode, and what real-world fact about `sell_prices` makes it meaningful?
+
+**Predict-the-decision**
+4. A2 obsessed over not using day *t*'s value; A3 happily uses day *t*'s calendar/SNAP/price.
+   Why is that not a contradiction?
+5. Calendar is joined with `F.broadcast(...)` but prices is not. What determines that choice,
+   and what does broadcasting actually avoid?
+6. Why must the calendar join happen *before* the price join (what does the price join need
+   that only calendar provides)?
+
+**Spot-the-flaw**
+7. A colleague fills null `sell_price` with `0` "to avoid nulls in the model." What signal does
+   that destroy, and what could the model wrongly infer?
+8. A join is written as an *inner* join on prices instead of *left*. Data looks fine in spot
+   checks. What silently changes, and which test would catch it?
+9. Someone computes `price_change_pct` with `lag("sell_price", 1)` (one day) instead of 7.
+   Given how M5 prices behave, what does that feature look like most days, and why is 7 chosen?
+
+---
+
+### Answers — A3
+
+1. `calendar` on **`d`** (day index), and `sell_prices` on **`(store_id, item_id, wm_yr_wk)`**
+   (store-item-week). `wm_yr_wk` is supplied by the calendar join.
+2. A `F.when(state_id=="CA", snap_CA).when(...TX...).when(...WI...)` chain selects the flag for
+   the series' own state; the three raw columns are then dropped. A series lives in exactly one
+   state, so the other two SNAP columns are noise — one correct flag models the effect and
+   feeds the C3 SNAP analysis.
+3. `has_price = sell_price is not null`. `sell_prices` only carries a row once an item is
+   **actually stocked** in that store, so a null price means "not sold here yet" — `has_price`
+   separates **structural** zeros (pre-launch) from **demand** zeros (stocked, sold none).
+4. A2's features are derived from the **target** (past sales), which isn't known at prediction
+   time — so they must be shifted. A3's are **exogenous covariates known in advance** (calendar
+   fixed, SNAP scheduled, prices posted ahead), so using day *t*'s value is legitimate. The
+   shift rule protects target-derived features, not known-ahead ones.
+5. **Size.** Calendar (~1,969 rows) is tiny enough to broadcast to every executor, turning the
+   join into a map-side lookup with **no shuffle**. Prices (~6.8M) is too big, so it's a normal
+   shuffle join. Broadcasting the small side avoids shuffling the *large* side across the network.
+6. The price join key includes **`wm_yr_wk`**, which the long sales frame doesn't have — it only
+   arrives when calendar is joined on `d`. No calendar join, no week key, no price join.
+7. It destroys the **structural-vs-demand-zero** distinction: a real posted price of 0 (there
+   are none) becomes indistinguishable from "not stocked." The model could read pre-launch
+   periods as genuine zero-demand-at-price-0 and learn nonsense about price sensitivity; it also
+   corrupts `price_change_pct`. Keep the null (and use `has_price`).
+8. An **inner** join drops every series-day with no matching price row — i.e. all pre-stock
+   (structural-zero) days vanish, silently shrinking the frame and biasing it toward stocked
+   periods. `test_joins_preserve_row_grain` (row count must stay one-per-series-day) catches it.
+9. M5 prices are **weekly-constant**, so a 1-day lag is 0 on ~6 of 7 days and only nonzero at the
+   week boundary — a noisy, mostly-dead feature. `lag(7)` compares this week's price to last
+   week's (same weekday, previous `wm_yr_wk`), giving a stable week-over-week delta on every row.

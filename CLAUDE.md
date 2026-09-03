@@ -70,6 +70,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # run tests         — uv run pytest       (pythonpath=. set in pyproject; testpaths=tests)
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
+# exog demo (A3)    — uv run python -m src.ingest.exogenous  (calendar/SNAP/price joins)
 # run backtest      — (set at B1)
 # launch dashboard  — (set at D1)
 
