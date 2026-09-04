@@ -107,3 +107,89 @@ choice, documented, not a limitation of the harness.)
 - **Metrics** — RMSSE/WMAPE against hand-computed values, incl. the first-sale scale trim and
   the undefined-scale → nan case.
 - **Baselines** — seasonal cycling, last-season-only, unseen-series → 0, ETS fallbacks.
+
+---
+
+## B2 (v1) — Global LightGBM point forecast
+
+**What B2 is:** the model the whole project is built to defend. One gradient-boosted tree model
+fit across *all* series in the slice at once — a **global** model — learning a single function
+`features → sales`. This is the approach that won M5, and it contrasts sharply with the
+baselines: seasonal-naive and ETS fit **one model per series**; LightGBM pools every series into
+one, so a sparse item borrows strength from the thousands of others that share its calendar and
+price dynamics. It plugs into the B1 harness through the exact same `forecast(train, test_keys)`
+shape the baselines use — the harness never learns it's driving something different.
+
+### The three decisions that make or break it
+
+**1. Recursive multi-step (the horizon problem).** The horizon is 28 days, but `lag_7` for
+day 10 is the sale on day 3 — *inside* the forecast window, unknown to a planner standing at the
+origin. Reading the feature store's precomputed `lag_7` for a test row would hand the model a
+future actual: leakage, and a beautiful dishonest score. So B2 forecasts **day by day**: predict
+day 1, append that prediction to the series' history *as if it were the actual*, recompute lags
+and rolling means, predict day 2, and so on. Errors compound across the horizon — which is
+honest, and is precisely the uncertainty B4's intervals exist to quantify. Implementation is
+**lockstep by horizon day**: for each future date, build one feature row per series, predict the
+whole batch, append predictions to each series' history, step to the next date (28 batched
+`model.predict` calls per origin, not one per series-day).
+
+**2. AR features are rebuilt in the model, not read from the store.** Training and the recursive
+test path call the *same* `_ar_row` / `_ar_train` builder. That guarantees they can't silently
+disagree, and it makes the test-time features **provably** a function of (past actuals + the
+model's own past predictions) only — the exact honesty property an interviewer will probe. The
+store's precomputed lag/rmean columns are used by nobody here.
+
+**3. The harness had to be widened (a real B1 change).** B1 passed the model only `(id, date)`
+for test rows — safe, but *too* strict: price, SNAP, and events are **legitimately known in
+advance** in M5 (Walmart publishes the future calendar and price files), and price is the single
+strongest exogenous demand signal in retail. Withholding it would handicap B2 unfairly. So
+`BacktestConfig` gained a `known_future` list; `evaluate_origin` passes those columns
+(calendar/price) alongside `(id, date)` — but **never `sales` and never the precomputed AR
+lags**, which encode the test-window actuals. Default is empty, so the baselines and every
+existing test are unchanged. This is the kind of change that reads as maturity: the harness
+enforces "known at forecast time," and we corrected *what* is legitimately known.
+
+### The feature set (v1) and why each is safe
+
+| group | features | why leak-free on test rows |
+|---|---|---|
+| autoregressive | `lag_7`, `lag_28`, `rmean_7`, `rmean_28` | rebuilt recursively from own history |
+| calendar | `wday`, `month`, `year` | derived from the date itself, both paths identically |
+| price / promo | `sell_price`, `price_change_pct`, `snap`, `is_event`, `event_type_1` | known-future, passed via `known_future` |
+| series identity | `dept_id`, `cat_id` (categorical) | static per series, looked up from train |
+
+**Series identity is carried by the lags/means + dept/cat, not a 3,049-way `item_id`
+categorical.** The lag and rolling-mean features already encode each series' level; a per-item
+categorical would explode tree size and invite overfit. dept/cat give the coarse structure that
+*pools* well. Categoricals use pandas `category` dtype with categories **frozen at fit** and
+reused at predict, so train and test share one encoding.
+
+**Objective = Tweedie** (`variance_power=1.1`). Daily item demand is intermittent and
+non-negative with many zeros; Tweedie is the standard loss for that regime (a compound
+Poisson-Gamma), and it beat plain regression in M5 write-ups. Predictions are clipped to ≥ 0.
+
+### v1 result (same 200-series CA_3 sample, 4 origins, horizon 28)
+
+| model | mean RMSSE | mean WMAPE |
+|---|---|---|
+| seasonal_naive_7 | 0.961 | 0.822 |
+| ets_7 | 0.735 | 0.706 |
+| **lightgbm_global_v1** | **0.732** | **0.680** |
+
+The honest read: v1 **edges** ETS on RMSSE (0.732 vs 0.735 — within noise) and wins more
+clearly on WMAPE (0.680 vs 0.706). The real headline isn't the RMSSE hair: it's that **one
+global model matches 200 individually-fit ETS models and scales to all ~30k series unchanged**,
+and it's a *single* model we can hang conformal intervals (B4) on. v2 enriches the feature set
+to widen the point-estimate margin — tracked as a separate MLflow run so the gain is measured.
+
+### What's tested (B2)
+
+- **Contract** — `forecast` returns a Series aligned to `test_keys.index`, full length,
+  no NaN, non-negative.
+- **Recursion covers the whole horizon** — horizon 28 > `lag_7`: every day is filled by the
+  feedback loop, none left null.
+- **No peeking** (`test_ignores_a_sales_column_on_test_keys`) — attaching a garbage `sales`
+  column to the test keys doesn't move a single prediction. The honesty guarantee, as a test.
+- **Sanity** — a flat series predicts near its constant level.
+- **Harness widening** (`test_backtest.py`) — `known_future` columns reach the model, `sales`
+  is withheld, and the default stays `(id, date)` only.

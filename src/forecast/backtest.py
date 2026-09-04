@@ -29,13 +29,18 @@ DEFAULT_TRACKING_URI = f"sqlite:///{_REPO / 'mlruns.db'}"
 
 @dataclass
 class BacktestConfig:
-    horizon: int = 28          # days forecast per origin (M5's horizon)
-    n_origins: int = 4         # number of rolling cutoffs
-    step: int = 28             # days between successive origins
-    season: int = 7            # weekly seasonality (for baselines / scale)
+    horizon: int = 28  # days forecast per origin (M5's horizon)
+    n_origins: int = 4  # number of rolling cutoffs
+    step: int = 28  # days between successive origins
+    season: int = 7  # weekly seasonality (for baselines / scale)
     experiment: str = "retail-demand-forecasting"
     tracking_uri: str | None = None  # defaults to the repo-local SQLite store
     extra_params: dict = field(default_factory=dict)  # e.g. {"scope": "CA_3"}
+    # Exogenous columns a planner legitimately knows for future dates (calendar, price) and may
+    # be handed to the model for test rows. `sales` and precomputed AR lags are NEVER included —
+    # those encode the test-window actuals and would leak. Default empty → model sees only
+    # (id, date), the strict contract the baselines rely on.
+    known_future: list = field(default_factory=list)
 
 
 def rolling_origins(unique_dates: np.ndarray, cfg: BacktestConfig) -> list:
@@ -64,10 +69,17 @@ def train_test_split(
     return train, test
 
 
-def evaluate_origin(train: pd.DataFrame, test: pd.DataFrame, model) -> dict:
+def evaluate_origin(
+    train: pd.DataFrame, test: pd.DataFrame, model, known_future: list | None = None
+) -> dict:
     """Fit/forecast for one origin and score. RMSSE is per-series (scaled by that series'
-    own training history) then averaged; WMAPE is pooled across all test rows."""
-    yhat = model.forecast(train, test[["id", "date"]])
+    own training history) then averaged; WMAPE is pooled across all test rows.
+
+    `known_future` names exogenous columns (calendar/price) handed to the model for test rows
+    in addition to (id, date). `sales` and precomputed AR lags are withheld — passing them
+    would leak the test-window actuals a real forecaster can't see."""
+    test_cols = ["id", "date", *(known_future or [])]
+    yhat = model.forecast(train, test[test_cols])
     scored = test[["id", "date", "sales"]].copy()
     scored["yhat"] = yhat
 
@@ -106,12 +118,13 @@ def run_backtest(df: pd.DataFrame, model, cfg: BacktestConfig | None = None) -> 
                 "step": cfg.step,
                 "season": cfg.season,
                 "n_series": df["id"].nunique(),
+                "known_future": ",".join(cfg.known_future) or "none",
                 **cfg.extra_params,
             }
         )
         for step, origin in enumerate(origins):
             train, test = train_test_split(df, origin, cfg, unique_dates)
-            m = evaluate_origin(train, test, model)
+            m = evaluate_origin(train, test, model, cfg.known_future)
             m["origin"] = pd.Timestamp(origin).date().isoformat()
             rows.append(m)
             mlflow.log_metric("rmsse", m["rmsse"], step=step)

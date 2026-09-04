@@ -77,6 +77,48 @@ def test_evaluate_origin_perfect_periodic_forecast_scores_zero():
     assert m["n_series"] == 3
 
 
+class _ColumnSpy:
+    """A fake forecaster that records the columns it was handed for the test rows, then
+    predicts zeros. Lets us assert the harness's known_future contract directly."""
+
+    name = "column_spy"
+
+    def __init__(self):
+        self.seen_cols = None
+
+    def forecast(self, train, test_keys):
+        self.seen_cols = list(test_keys.columns)
+        return pd.Series(0.0, index=test_keys.index)
+
+
+def test_known_future_columns_are_passed_but_sales_is_withheld():
+    df = _panel(days=60)
+    df["sell_price"] = 1.0  # a known-future exog column to request
+    dates = np.sort(df["date"].unique())
+    cfg = BacktestConfig(horizon=7, season=7, known_future=["sell_price"])
+    origin = rolling_origins(dates, cfg)[-1]
+    train, test = train_test_split(df, origin, cfg, dates)
+
+    spy = _ColumnSpy()
+    evaluate_origin(train, test, spy, cfg.known_future)
+    assert spy.seen_cols == ["id", "date", "sell_price"]
+    assert "sales" not in spy.seen_cols  # actuals never reach the model
+
+
+def test_known_future_defaults_to_id_date_only():
+    # Backward compatibility: with no known_future, the model sees exactly (id, date) — the
+    # strict contract the baselines were written against.
+    df = _panel(days=60)
+    dates = np.sort(df["date"].unique())
+    cfg = BacktestConfig(horizon=7, season=7)
+    origin = rolling_origins(dates, cfg)[-1]
+    train, test = train_test_split(df, origin, cfg, dates)
+
+    spy = _ColumnSpy()
+    evaluate_origin(train, test, spy, cfg.known_future)
+    assert spy.seen_cols == ["id", "date"]
+
+
 def test_run_backtest_returns_per_origin_frame(tmp_path):
     # Point MLflow at a throwaway SQLite store so tests don't touch the repo's mlruns.db.
     cfg = BacktestConfig(

@@ -69,6 +69,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # lint / format     — uv run ruff check . / uv run ruff format .
 # run tests         — uv run pytest       (pythonpath=. set in pyproject; testpaths=tests)
 # run backtest (B1) — uv run python -m src.forecast.backtest  (baselines on CA_3 sample, MLflow)
+# run LightGBM (B2) — uv run python -m src.forecast.models  (global recursive LGBM, same sample)
 # mlflow ui         — uv run mlflow ui --backend-store-uri sqlite:///mlruns.db  (view runs)
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
@@ -89,6 +90,12 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   Model protocol = forecast(train, test_keys)->yhat. MLflow -> sqlite:///mlruns.db (gitignored).
 #   Baseline bar on CA_3 200-series sample (4 origins, h=28): seasonal_naive RMSSE 0.96 / WMAPE
 #   0.82; ETS RMSSE 0.735 / WMAPE 0.71. B2 LightGBM must beat ~0.735 RMSSE (or explain honestly).
+# LightGBM (B2, src/forecast/models.py): global recursive model, one fit across all series.
+#   Recursive multi-step (own preds feed lags); AR features rebuilt in-model (not from store);
+#   Tweedie objective; series identity via lags+dept/cat, not item_id. Widened the harness:
+#   BacktestConfig.known_future passes calendar/price to test rows (never sales/precomputed lags).
+#   v1 (lags 7,28 / rmean 7,28): RMSSE 0.732 / WMAPE 0.680 — edges ETS, wins WMAPE. v2 = enrich.
+#   version= flows into MLflow run name (lightgbm_global_v1/_v2) so runs compare, not overwrite.
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
