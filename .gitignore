@@ -23,6 +23,8 @@ env/
 # --- Tooling ---
 .mlruns/
 mlruns/
+mlruns.db
+mlartifacts/
 .pytest_cache/
 .ruff_cache/
 .DS_Store

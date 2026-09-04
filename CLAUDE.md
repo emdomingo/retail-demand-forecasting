@@ -68,13 +68,14 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #                     needs KAGGLE_API_TOKEN in .env (gitignored) + accepted M5 rules (else 403)
 # lint / format     — uv run ruff check . / uv run ruff format .
 # run tests         — uv run pytest       (pythonpath=. set in pyproject; testpaths=tests)
+# run backtest (B1) — uv run python -m src.forecast.backtest  (baselines on CA_3 sample, MLflow)
+# mlflow ui         — uv run mlflow ui --backend-store-uri sqlite:///mlruns.db  (view runs)
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
 # exog demo (A3)    — uv run python -m src.ingest.exogenous  (calendar/SNAP/price joins)
 # build store (A4)  — uv run python -m src.ingest.feature_store  (full pipeline -> Parquet, ~2-3 min)
 # read slice (A4)   — uv run python -m src.query.slices  (DuckDB slice-read demo)
 #   in code: from src.query.slices import read_store_slice; df = read_store_slice("CA_3")
-# run backtest      — (set at B1)
 # launch dashboard  — (set at D1)
 
 # Env facts (A0): Python 3.11 (uv-managed), Java 17 (Homebrew, for the Spark JVM),
@@ -84,6 +85,10 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   store_id (10 dirs), 59.18M rows, grain = one row per (id, d_int). Downcast: sales/lags/
 #   d_int int16, flags int8, means/prices float32, wm_yr_wk stays int32. Read via DuckDB
 #   (src/query/slices.py) — always ORDER BY date. Rebuild needs 8g driver heap (get_spark).
+# Backtest (B1): rolling-origin harness in src/forecast/ (metrics.py, baselines.py, backtest.py).
+#   Model protocol = forecast(train, test_keys)->yhat. MLflow -> sqlite:///mlruns.db (gitignored).
+#   Baseline bar on CA_3 200-series sample (4 origins, h=28): seasonal_naive RMSSE 0.96 / WMAPE
+#   0.82; ETS RMSSE 0.735 / WMAPE 0.71. B2 LightGBM must beat ~0.735 RMSSE (or explain honestly).
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
