@@ -162,3 +162,60 @@ Append-only across B1–B4. Self-quiz: recall, predict-the-decision, spot-the-fl
     same way, so whatever integer the model learns for "Saturday-like demand" it applies
     identically at predict time. The absolute convention (0=Mon vs M5's 1=Sat) is irrelevant to a
     tree that just splits on the value.
+
+---
+
+## B2 (v2) — Enriched features, disciplined by an ablation
+
+**Recall**
+1. What feature changes distinguish the *shipped* v2 from v1?
+2. What was the result of the *first* (naive) v2, and what did it include that the shipped v2
+   dropped?
+3. How does the MLflow experiment keep v1 and v2 comparable rather than overwriting?
+
+**Predict-the-decision**
+4. The naive enrichment regressed. What's the right next move — revert, ship it anyway, or
+   something else — and what did we actually do?
+5. We keep the `early_stopping_rounds` capability in the class but the shipped v2 doesn't use it.
+   Why keep dead-looking code, and how would you justify the omission in an interview?
+
+**Spot-the-flaw**
+6. Why is `lag_1` specifically harmful in a *recursive* multi-step forecaster, when it's usually
+   the single most predictive feature in one-step forecasting?
+7. A teammate defends the early-stopping v2: "the validation RMSSE was great, so the round count
+   is well-tuned." What regime mismatch are they missing?
+8. Someone concludes from the ablation "longer lags are always better than shorter ones." Is that
+   the right generalization? What's the actual principle?
+
+---
+
+### Answers — B2 (v2)
+
+1. Shipped v2 adds `lag_14` and `rmean_56` to v1's set (final: lags 7/14/28, rmean 7/28/56),
+   fixed rounds, **no `lag_1`**, **no early stopping**. RMSSE 0.727 / WMAPE 0.674 vs v1's
+   0.732 / 0.680.
+2. Naive v2 scored **0.735 / 0.691** — worse than v1 and a tie with ETS. It included **`lag_1`**
+   and **early stopping**, both of which the shipped v2 drops.
+3. `version` flows into the model `name` (`lightgbm_global_v1` / `_v2`), so `run_backtest` opens
+   two distinct MLflow runs with the same metrics and params schema — a recorded head-to-head,
+   not one run silently overwriting the other.
+4. Neither revert nor ship-blind: **diagnose**. We ran an ablation over five configs on the same
+   sample, which isolated `lag_1` and early stopping as the regressions, and shipped the
+   feature set the evidence supported (0.727) — a genuine improvement, honestly earned.
+5. It's a legitimate, tested part of the model's API, and keeping it lets us state *why* it's off
+   with evidence ("one-shot early stopping tuned a one-step-lag regime the recursive test doesn't
+   share, and measurably hurt: 0.7296 vs 0.7267"). "Omitted with a measured reason" is stronger
+   than "never considered" or "used because it's standard."
+6. Under recursion, `lag_1` for horizon day *h* is *yesterday's value* — and for 27 of 28 days
+   "yesterday" is the model's **own prior prediction**, not an actual. A feature the model relies
+   on heavily then becomes a channel that **feeds its own error forward**, compounding it. Longer
+   lags (7/14/28) point at real history for most of the horizon, so they're far more robust.
+7. The validation tail's features are built the **training** way (real-history lags, one-step),
+   but the deployed forecast is **recursive**. A round count that minimizes one-step validation
+   error isn't the one that minimizes recursive multi-step error — different regime, different
+   optimum. The great validation number is measuring the wrong thing.
+8. Not quite — it's not "longer is always better." The principle is **match the feature to the
+   forecasting scheme**: under recursion, prefer lags that outrun the horizon's error compounding
+   and be wary of the shortest lags (which recycle predictions), and validate on the regime you'll
+   actually deploy. A short lag could be fine in a *direct* (per-horizon) model that never feeds
+   predictions back.

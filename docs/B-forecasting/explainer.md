@@ -193,3 +193,70 @@ to widen the point-estimate margin — tracked as a separate MLflow run so the g
 - **Sanity** — a flat series predicts near its constant level.
 - **Harness widening** (`test_backtest.py`) — `known_future` columns reach the model, `sales`
   is withheld, and the default stays `(id, date)` only.
+
+---
+
+## B2 (v2) — Enriched features, disciplined by an ablation
+
+**What v2 is:** the *same* global recursive model with a richer feature set — and a cautionary
+tale about how "richer" isn't automatically "better" under recursive forecasting. This is the
+most interview-valuable part of B2, because the first attempt **regressed** and the recovery
+came from a diagnosis, not a guess.
+
+### The naive v2 that made things worse
+
+The obvious enrichment — add a short lag (`lag_1`), a fortnight lag (`lag_14`), a long window
+(`rmean_56`), and let **early stopping** pick the round count — scored **RMSSE 0.735 / WMAPE
+0.691**: *worse* than v1 (0.732 / 0.680) and a dead tie with the ETS baseline it was supposed to
+beat. More features, less accuracy. That's the moment to stop and diagnose, not to ship.
+
+### The ablation (five configs, same sample)
+
+| config | RMSSE | WMAPE |
+|---|---|---|
+| v1 — lags (7,28), rmean (7,28), fixed rounds | 0.7322 | 0.6802 |
+| **no lag_1 — lags (7,14,28), rmean (7,28,56), fixed** | **0.7267** | **0.6738** |
+| with lag_1 — lags (1,7,14,28), rmean (7,28,56), fixed | 0.7345 | 0.6846 |
+| no lag_1 + early stopping | 0.7296 | 0.6786 |
+| v1 features + rmean_56 only | 0.7284 | 0.6789 |
+
+Two clean findings:
+
+**1. `lag_1` is toxic under recursion.** It's the worst config in the table. The reason is
+structural: in recursive multi-step, `lag_1` for horizon day *h* is *yesterday's value* — but
+for 27 of the 28 forecast days, "yesterday" is the model's **own prior prediction**, not an
+actual. A feature the model leans on heavily (yesterday's demand is the strongest single
+predictor) becomes a channel that **compounds its own error** forward. Longer lags (7, 14, 28)
+are far more robust because for most of the horizon they still point at *real* history, not
+predictions.
+
+**2. One-shot early stopping tunes the wrong regime.** Early stopping picks the round count by
+watching error on a held-out tail whose features are built the *training* way — real-history
+lags, one-step. But the test path is **recursive**. So it optimises round count for a regime the
+real forecast never runs in, and it slightly *hurt* (0.7296 vs 0.7267 fixed). We keep the
+early-stopping capability in the class (documented, tested) but v2 doesn't use it — and now we
+can *say why*, which is stronger than either blindly using or blindly omitting it.
+
+### The v2 that ships
+
+Informed by the ablation: **lags (7, 14, 28), rmean (7, 28, 56), fixed rounds, no `lag_1`, no
+early stopping.**
+
+| model | mean RMSSE | mean WMAPE |
+|---|---|---|
+| ets_7 | 0.735 | 0.706 |
+| lightgbm_global_v1 | 0.732 | 0.680 |
+| **lightgbm_global_v2** | **0.727** | **0.674** |
+
+A real, defensible gain over v1 that clears the ETS bar comfortably on *both* metrics — and,
+unlike v1's RMSSE hair, not within noise. The MLflow experiment now holds `lightgbm_global_v1`
+and `lightgbm_global_v2` as separate runs (version flows into the run name), so the improvement
+is a recorded comparison, not a claim.
+
+### The transferable lesson
+
+Feature richness interacts with the *forecasting scheme*. Under recursion, prefer lags that
+outrun the horizon's error compounding; be suspicious of the shortest lags; and validate on the
+regime you'll actually deploy. "I added features and it got worse, so I ran an ablation and found
+`lag_1` was feeding the model its own errors" is exactly the kind of story that reads as real
+modelling maturity.

@@ -112,3 +112,20 @@ def test_constant_series_predicts_near_that_constant():
 def test_version_flows_into_name():
     assert LightGBMForecaster(version="v1").name == "lightgbm_global_v1"
     assert LightGBMForecaster(version="v2").name == "lightgbm_global_v2"
+
+
+def test_early_stopping_path_trains_and_forecasts():
+    # Exercise the early-stopping branch (held-out validation tail picks the round count) and
+    # confirm it still honours the forecaster contract.
+    df = _panel(days=90)
+    train, _, keys = _split(df, horizon=14)
+    model = LightGBMForecaster(
+        num_boost_round=60,
+        early_stopping_rounds=10,
+        valid_days=14,
+        params={"min_data_in_leaf": 5, "min_data_in_bin": 1},
+    )
+    out = model.forecast(train, keys)
+    assert len(out) == len(keys)
+    assert not out.isna().any()
+    assert (out >= 0).all()

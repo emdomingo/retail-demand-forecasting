@@ -65,11 +65,17 @@ class LightGBMForecaster:
         num_boost_round: int = 300,
         params: dict | None = None,
         version: str = "v1",
+        early_stopping_rounds: int | None = None,
+        valid_days: int = 28,
     ):
         self.lags = lags
         self.roll_windows = roll_windows
         self.num_boost_round = num_boost_round
         self.params = {**_DEFAULT_PARAMS, **(params or {})}
+        # Optional early stopping: hold out the last `valid_days` of train (by date) as a
+        # validation tail and let LightGBM pick the round count, instead of a fixed guess.
+        self.early_stopping_rounds = early_stopping_rounds
+        self.valid_days = valid_days
         # Version flows into the MLflow run name so the v1 (thin) and v2 (enriched) feature sets
         # are two comparable rows, not one run silently overwritten.
         self.version = version
@@ -127,8 +133,7 @@ class LightGBMForecaster:
         }
         X = self._as_categoricals(X)
 
-        dset = lgb.Dataset(X, label=y, categorical_feature=self._cat_features, free_raw_data=False)
-        self._model = lgb.train(self.params, dset, num_boost_round=self.num_boost_round)
+        self._model = self._train_lgb(X, y, train["date"].to_numpy())
 
         # Static per-series attributes, looked up for test rows the harness only gives id/date.
         self._series_attrs = train.groupby("id", sort=False)[STATIC_CATS].first().to_dict("index")
@@ -137,6 +142,37 @@ class LightGBMForecaster:
             id_: g.sort_values("date")["sales"].to_numpy(dtype=float)
             for id_, g in train.groupby("id", sort=False)
         }
+
+    def _train_lgb(self, X: pd.DataFrame, y: np.ndarray, dates: np.ndarray) -> lgb.Booster:
+        """Train the booster. Without early stopping, a fixed round count. With it, hold out the
+        last `valid_days` of train by date as a validation tail (its AR features are built the
+        training way from real history — a clean signal for *when to stop adding rounds*, which
+        overfits regardless of the recursive/one-shot distinction) and let LightGBM pick the
+        round count."""
+        cat = self._cat_features
+        if not self.early_stopping_rounds:
+            dset = lgb.Dataset(X, label=y, categorical_feature=cat, free_raw_data=False)
+            return lgb.train(self.params, dset, num_boost_round=self.num_boost_round)
+
+        cutoff = np.sort(np.unique(dates))[-self.valid_days]
+        is_valid = dates >= cutoff
+        fit_set = lgb.Dataset(
+            X[~is_valid], label=y[~is_valid], categorical_feature=cat, free_raw_data=False
+        )
+        valid_set = lgb.Dataset(
+            X[is_valid],
+            label=y[is_valid],
+            categorical_feature=cat,
+            reference=fit_set,
+            free_raw_data=False,
+        )
+        return lgb.train(
+            self.params,
+            fit_set,
+            num_boost_round=self.num_boost_round,
+            valid_sets=[valid_set],
+            callbacks=[lgb.early_stopping(self.early_stopping_rounds, verbose=False)],
+        )
 
     def _ar_row(self, hist: np.ndarray) -> dict:
         """AR features for the next step given a series' history so far (actuals then own
@@ -184,19 +220,34 @@ class LightGBMForecaster:
 KNOWN_FUTURE = ["sell_price", "price_change_pct", "snap", "is_event", "event_type_1"]
 
 
+def v1() -> LightGBMForecaster:
+    """v1 — the thin, defensible feature set: lags 7/28, rolling means 7/28, fixed rounds."""
+    return LightGBMForecaster(version="v1")
+
+
+def v2() -> LightGBMForecaster:
+    """v2 — enriched, but *disciplined by an ablation* (see docs/B-forecasting/explainer.md).
+
+    Adds a fortnight lag (14) and a long window (56) for more trend/recent-demand signal. It
+    deliberately does NOT add lag_1 and does NOT use early stopping, both of which an ablation
+    showed *regress* under recursive forecasting: lag_1 is the model's own prior prediction for
+    27 of 28 horizon days (it amplifies error compounding), and one-shot early stopping tunes to
+    a one-step-lag validation regime the recursive test path doesn't share. The naive
+    'more features + early stopping' v2 scored 0.735 RMSSE (a tie with ETS); this one scores
+    0.727 — a real gain over v1's 0.732."""
+    return LightGBMForecaster(
+        version="v2",
+        lags=(7, 14, 28),
+        roll_windows=(7, 28, 56),
+    )
+
+
 def main() -> None:
     from src.forecast.backtest import BacktestConfig, run_backtest
     from src.query.slices import read_store_slice
 
     store = "CA_3"
-    cols = [
-        "id",
-        "dept_id",
-        "cat_id",
-        "date",
-        "sales",
-        *KNOWN_FUTURE,
-    ]
+    cols = ["id", "dept_id", "cat_id", "date", "sales", *KNOWN_FUTURE]
     df = read_store_slice(store, columns=cols)
 
     # Same fixed 200-series sample and seed as the baseline run (backtest.main) — a like-for-like
@@ -208,10 +259,12 @@ def main() -> None:
     cfg = BacktestConfig(known_future=KNOWN_FUTURE, extra_params={"scope": f"{store}_sample200"})
 
     print(f"Backtesting LightGBM on {len(sample_ids)} series from {store}...")
-    res = run_backtest(sample, LightGBMForecaster(), cfg)
-    print(f"\n{LightGBMForecaster().name}:")
-    print(res.to_string(index=False))
-    print(f"  MEAN  rmsse={res['rmsse'].mean():.4f}  wmape={res['wmape'].mean():.4f}")
+    for model in (v1(), v2()):
+        res = run_backtest(sample, model, cfg)
+        print(f"\n{model.name}:")
+        print(res.to_string(index=False))
+        print(f"  MEAN  rmsse={res['rmsse'].mean():.4f}  wmape={res['wmape'].mean():.4f}")
+    print("\n  bar to beat (B1): ets_7 rmsse=0.735 wmape=0.706 | seasonal_naive rmsse=0.96")
     print("  bar to beat (B1): ets_7 rmsse=0.735  |  seasonal_naive rmsse=0.96")
 
 

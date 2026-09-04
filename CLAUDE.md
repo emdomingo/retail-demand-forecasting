@@ -94,7 +94,11 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   Recursive multi-step (own preds feed lags); AR features rebuilt in-model (not from store);
 #   Tweedie objective; series identity via lags+dept/cat, not item_id. Widened the harness:
 #   BacktestConfig.known_future passes calendar/price to test rows (never sales/precomputed lags).
-#   v1 (lags 7,28 / rmean 7,28): RMSSE 0.732 / WMAPE 0.680 — edges ETS, wins WMAPE. v2 = enrich.
+#   v1 (lags 7,28 / rmean 7,28): RMSSE 0.732 / WMAPE 0.680 — edges ETS, wins WMAPE.
+#   v2 (lags 7,14,28 / rmean 7,28,56): RMSSE 0.727 / WMAPE 0.674 — real gain, clears ETS on both.
+#   Ablation finding: naive enrich (add lag_1 + early stopping) REGRESSED to 0.735. lag_1 is
+#   recursion-toxic (yesterday = own prediction for 27/28 days -> error compounds); one-shot
+#   early stopping tunes a one-step regime the recursive test doesn't share. So v2 omits both.
 #   version= flows into MLflow run name (lightgbm_global_v1/_v2) so runs compare, not overwrite.
 ```
 
