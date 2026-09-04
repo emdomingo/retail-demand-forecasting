@@ -27,6 +27,11 @@ origin₁            origin₂            origin₃  (each leaves `horizon` days
 [========== train ==========]→ hzn        ← expanding window; test never overlaps train
 ```
 
+> 🔁 **Interactive walkthrough** — step through the origins, watch the training window expand and
+> the test window march forward, and see the no-leakage invariant at each cutoff:
+> [rolling-origin backtest visualiser](https://claude.ai/code/artifact/236a5c4e-6291-4102-b32f-5b7b475d2868)
+> (private Artifact; the sliders recompute origins with the exact `rolling_origins` logic).
+
 We use an **expanding window** (train grows with each origin) — a planner accumulates history,
 they don't throw it away. Origins are placed from the end backward: the latest leaves exactly
 `horizon` days after it, earlier ones step back by `step`. Origins with no training history are
@@ -260,3 +265,83 @@ outrun the horizon's error compounding; be suspicious of the shortest lags; and 
 regime you'll actually deploy. "I added features and it got worse, so I ran an ablation and found
 `lag_1` was feeding the model its own errors" is exactly the kind of story that reads as real
 modelling maturity.
+
+---
+
+## B3 — SARIMA: the classical per-series comparison
+
+**What B3 is:** the *classical* comparison model — seasonal ARIMA, fit one model per series, the
+same philosophy as ETS but with an explicit AR/MA/seasonal structure. It exists to complete the
+model-family comparison the harness was built for: with B3 the same rolling-origin backtest, on
+the same 200-series CA_3 sample, now scores **three distinct philosophies** side by side —
+per-series smoothing (ETS), per-series ARIMA (SARIMA), and one global pooled tree model
+(LightGBM). SPEC frames B3 as the classical entry and the *slack-absorber*; the job is an honest
+head-to-head, not to win. It plugs into the harness through the same `forecast(train, test_keys)`
+shape as everything else (see `sarima.py`).
+
+### The three decisions that must survive scrutiny
+
+**1. Per-series — the deliberate contrast to B2's global model.** SARIMA fits one state-space
+model on each series' own history. That's the "every series is its own universe" stance; B2 is
+"pool signal across all series." Running both on the same harness is the entire point — the
+comparison is only meaningful because the *only* thing that changes is the model. Per-series
+fitting is slow (see runtime below), so B3 keeps B2's fixed 200-series sample for a like-for-like
+number.
+
+**2. A fixed, motivated order — not a per-series auto-search.** `pmdarima`'s stepwise
+`auto_arima` is the reflex choice, but it's the wrong one here: (a) it carries numpy-2
+compatibility friction and a heavy dependency, and (b) more importantly, searching an order *per
+series* across ~30k intermittent, often-short series is neither reproducible nor defensible — it
+overfits the **order itself** to noise. A single argued order is the honest scoped choice,
+consistent with the project's "scope the model, state it explicitly" rule. The order is
+**SARIMA(1,1,1)(1,0,0)₇**:
+
+| term | choice | reasoning |
+|---|---|---|
+| non-seasonal `(p,d,q)` | `(1,1,1)` | AR(1)+MA(1) on a first difference captures short-run level dynamics |
+| seasonal `(P,D,Q)` | `(1,0,0)` | one seasonal AR term captures the **weekly cycle** — the structure ETS's additive season also targets, so the comparison is fair |
+| seasonal period `m` | `7` | daily data, weekly seasonality |
+| seasonal differencing `D` | **`0`** | differencing over m=7 on zero-heavy short series loses a week and routinely **destabilises** the fit for little gain |
+
+**3. Robust by construction, because classical fits fail on intermittent demand.** Too-short
+(`< 2` seasons) or all-zero series skip the fit and fall back to the last value — the same
+contract ETS uses, so the two classical models degrade identically on the hard series. The
+optimiser runs with `enforce_stationarity=False`/`enforce_invertibility=False` (converges far
+more often on messy retail series; we clip to 0 anyway, so we don't need a provably
+stationary parameterisation) and a bounded `maxiter=50` (can't hang). Any convergence or
+non-finite-forecast failure also falls back. Forecasts clip to ≥ 0.
+
+### Result (same 200-series CA_3 sample, 4 origins, horizon 28)
+
+| model | mean RMSSE | mean WMAPE |
+|---|---|---|
+| seasonal_naive_7 | 0.961 | 0.822 |
+| ets_7 | 0.735 | 0.706 |
+| **sarima_111_100_7** | **0.734** | **0.696** |
+| lightgbm_global_v2 | **0.727** | **0.674** |
+
+**The honest read.** SARIMA and ETS are a **statistical tie** on RMSSE (0.734 vs 0.735); SARIMA
+is marginally better on WMAPE. That is not a disappointing result — it's the *expected* and
+interesting one: **two different classical per-series methods plateau at essentially the same
+place (~0.735)** on intermittent daily demand, and the **global pooled model (LightGBM v2, 0.727)
+sits clearly below both.** The story the comparison tells is exactly the M5 lesson — pooling
+signal across series beats fitting each series in isolation, and *which* per-series method you
+pick barely matters once you're in that regime. A convergent plateau across two independent
+classical models is stronger evidence for that claim than beating a single weak baseline would be.
+
+**Runtime is part of the story too.** The SARIMA backtest took **~2m20s** (800 state-space fits:
+200 series × 4 origins, each on a growing window). ETS is comparable; the global LightGBM fits
+*once per origin* (4 fits total) and is far faster while scoring better — the pooled approach wins
+on accuracy **and** on the compute that matters when you scale from 200 series to 30k.
+
+### What's tested (B3)
+
+We test the **robustness contract**, not fitted values — a per-series SARIMA fit is a stochastic
+optimisation, so asserting exact numbers would be brittle.
+
+- **Fallbacks** — short (`< 2` seasons) and all-zero series return the last value / 0, repeated.
+- **Unseen series** — an id absent from train predicts 0 (harness contract).
+- **Output contract** — on a real seasonal series the fit runs and the output is aligned to
+  `test_keys.index`, non-negative, and finite.
+- **Name encodes the order** — `sarima_111_100_7`, so the MLflow run is self-describing and
+  distinct from ETS.

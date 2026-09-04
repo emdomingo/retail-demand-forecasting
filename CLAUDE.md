@@ -70,6 +70,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # run tests         — uv run pytest       (pythonpath=. set in pyproject; testpaths=tests)
 # run backtest (B1) — uv run python -m src.forecast.backtest  (baselines on CA_3 sample, MLflow)
 # run LightGBM (B2) — uv run python -m src.forecast.models  (global recursive LGBM, same sample)
+# run SARIMA (B3)   — uv run python -m src.forecast.sarima  (per-series SARIMA, same sample; ~2m20s)
 # mlflow ui         — uv run mlflow ui --backend-store-uri sqlite:///mlruns.db  (view runs)
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
@@ -100,6 +101,14 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   recursion-toxic (yesterday = own prediction for 27/28 days -> error compounds); one-shot
 #   early stopping tunes a one-step regime the recursive test doesn't share. So v2 omits both.
 #   version= flows into MLflow run name (lightgbm_global_v1/_v2) so runs compare, not overwrite.
+# SARIMA (B3, src/forecast/sarima.py): classical per-series comparison (contrast to B2's global).
+#   Fixed order SARIMA(1,1,1)(1,0,0)_7 — NOT pmdarima auto_arima (per-series order search overfits
+#   the order to noise + numpy-2 friction). D=0 on purpose (seasonal diff over m=7 destabilises
+#   zero-heavy short series). Robust: <2-season/all-zero -> last-value fallback (matches ETS),
+#   stationarity/invertibility unenforced (converges more; clipped to >=0), maxiter=50, any fail
+#   falls back. Result: RMSSE 0.734 / WMAPE 0.696 — a TIE with ets (0.735); both classical
+#   per-series methods plateau ~0.735 while global LightGBM v2 (0.727) wins. The plateau IS the
+#   finding (pooling beats isolation; the specific per-series method barely matters). ~2m20s.
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)

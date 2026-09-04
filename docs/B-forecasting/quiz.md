@@ -219,3 +219,77 @@ Append-only across B1–B4. Self-quiz: recall, predict-the-decision, spot-the-fl
    and be wary of the shortest lags (which recycle predictions), and validate on the regime you'll
    actually deploy. A short lag could be fine in a *direct* (per-horizon) model that never feeds
    predictions back.
+
+---
+
+## B3 — SARIMA: the classical per-series comparison
+
+**Recall**
+1. Structurally, how is SARIMA fit differently from LightGBM? Which of ETS/SARIMA/LightGBM share
+   a fitting philosophy?
+2. What order did we fix, and what does each of the two triples `(p,d,q)(P,D,Q)ₘ` contribute?
+3. Why does the SARIMA backtest take minutes while LightGBM's is quick, when LightGBM is the
+   "bigger" model?
+
+**Predict-the-decision**
+4. Why a single fixed order instead of `pmdarima`'s per-series `auto_arima`? Give both reasons.
+5. We set seasonal differencing `D = 0`, not `1`. What's the argument, given the data?
+6. `enforce_stationarity=False` and `enforce_invertibility=False` are set on the fit. Why is that
+   defensible here rather than sloppy?
+7. SARIMA lands at 0.734 RMSSE — a tie with ETS, and it *loses* to LightGBM. Why is that a
+   satisfying result to report rather than a failure of B3?
+
+**Spot-the-flaw**
+8. A colleague runs `auto_arima` per series across all 30k series, picks the best order for each,
+   and reports a big accuracy jump on the training fit. Why be suspicious?
+9. Someone removes the `< 2*season` / all-zero fallback "because SARIMAX can handle any series."
+   What happens on the intermittent M5 series, and why did we add the guard?
+10. To "make the comparison fairer," a teammate proposes fitting SARIMA on **all** ~3,049 CA_3
+    series instead of the 200-series sample, but LightGBM on the sample. What's wrong with that?
+
+---
+
+### Answers — B3
+
+1. SARIMA fits **one model per series** on that series' own history (a state-space seasonal
+   ARIMA); LightGBM fits **one global model** across all series at once. **ETS and SARIMA share
+   the per-series philosophy**; LightGBM is the pooled contrast. That shared philosophy is exactly
+   why their near-identical scores are informative.
+2. **SARIMA(1,1,1)(1,0,0)₇.** `(1,1,1)` = AR(1)+MA(1) on a first difference (`d=1`), capturing
+   short-run level dynamics; `(1,0,0)₇` = one **seasonal AR** term at lag 7, capturing the weekly
+   cycle (the same structure ETS's additive season targets, so the comparison is fair); no
+   seasonal differencing (`D=0`).
+3. SARIMA fits **800 models** (200 series × 4 origins), each a numerical optimisation on a growing
+   window (~2m20s). LightGBM fits **once per origin** (4 fits) over all series pooled. Per-series
+   classical methods pay a fit cost that scales with the number of series; the global model
+   amortises it — and this compute gap *widens* from 200 series to 30k.
+4. (a) **Reproducibility/defensibility** — a per-series order search across ~30k intermittent,
+   often-short series overfits the **order itself** to noise and is unauditable; a single argued
+   order is the honest scoped choice. (b) **Dependency friction** — `pmdarima` carries numpy-2
+   compatibility problems and a heavy dependency we don't need.
+5. Differencing over `m=7` (`D=1`) throws away a full week of history at the series start and, on
+   **zero-heavy short** M5 series, routinely destabilises the fit (near-singular seasonal
+   differences) for little accuracy gain. The weekly pattern is captured by the seasonal **AR**
+   term instead, which is more stable on this data.
+6. The unenforced constraints let the optimiser **converge far more often** on messy retail
+   series (fewer fallbacks to last-value, so more series actually get modelled). It'd be sloppy if
+   we shipped the raw output, but we **clip forecasts to ≥ 0** and only use the point forecast, so
+   we never rely on a provably stationary/invertible parameterisation — the guardrail makes the
+   relaxation safe.
+7. Because the *convergent plateau* is the finding. Two **independent** classical per-series
+   methods (ETS smoothing, SARIMA) land at essentially the same RMSSE (~0.735), and the **global
+   pooled model sits clearly below** (0.727). That's strong, replicated evidence for the core M5
+   lesson — pooling beats isolation, and the specific per-series method barely matters once you're
+   there. A single method beating a single weak baseline would prove far less.
+8. The jump is on the **training fit**, not a rolling-origin score — best-order-per-series is
+   fitting the order to in-sample noise, which won't hold out of sample. The honest test is the
+   *same* rolling-origin harness with a *fixed* order; per-series order selection would need its
+   own leakage-safe selection inside each origin's train window, or it's just overfitting.
+9. On all-zero or near-zero intermittent series, SARIMAX either fails to converge, throws
+   (linalg/degenerate), or emits non-finite / wildly negative forecasts. The guard returns the
+   honest last-value fallback (matching ETS), so the two classical models degrade **identically**
+   on the hard series and the comparison stays clean — and the backtest doesn't crash mid-run.
+10. It breaks the **like-for-like** comparison — the whole value of the harness is that only the
+    *model* changes between runs. Different series populations (harder/easier mixes, different
+    volume distributions) make the RMSSE numbers incomparable. Sample size is a **runtime** choice
+    that must be held **identical** across models; scale *all* models together or none.
