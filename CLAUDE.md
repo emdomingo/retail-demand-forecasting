@@ -72,6 +72,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # run LightGBM (B2) — uv run python -m src.forecast.models  (global recursive LGBM, same sample)
 # run SARIMA (B3)   — uv run python -m src.forecast.sarima  (per-series SARIMA, same sample; ~2m20s)
 # run intervals (B4)— uv run python -m src.forecast.intervals  (conformal coverage eval; ~40s)
+# run DiD (C2)      — uv run python -m src.causal.did  (price-cut DiD + event study + placebo; ~9s)
 # mlflow ui         — uv run mlflow ui --backend-store-uri sqlite:///mlruns.db  (view runs)
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
@@ -119,6 +120,17 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   calibrated. Coverage is MARGINAL (over series), not per-series conditional (named limitation).
 #   EnbPI (online TS-correct upgrade) + quantile regression (muddy under recursion) NAMED not built.
 #   Exchangeability caveat named. MLflow logs coverage + per-h coverage/width.
+# DiD (C2, src/causal/did.py): the causal half — how much of the post-cut jump the price cut
+#   CAUSED. Treated FOODS_3_697 @ CA_3, cut 2011-08-08 ($3.58->$2.98, -16.8%). Reads the same
+#   feature store via DuckDB, aggregates to WEEKLY (M5 prices are weekly; kills day-of-week noise),
+#   matched top-15 controls (pre-cut corr, price-stable +/-8w, demand bar). Estimator = TWFE OLS
+#   log_units ~ C(item)+C(week)+treated:post, cluster SE by item. Balanced +/-26w window (thin ~27w
+#   pre-period). Result: +42.1% lift (95% CI [+12.5%, +79.4%]), elasticity ~ -2.5 — DISCIPLINED
+#   DOWN from the naive +56% (raw jump overstated by a third; that gap IS the method's value).
+#   Evidence: event-study leads flat (slope ~-0.02/wk, no pre-trend) + placebo covers 0 (pass,
+#   though noisy -27.7% point). Few-cluster SE understates uncertainty -> wild bootstrap NAMED not
+#   built. Single-store estimate is noisy BY DESIGN -> C2b replicates chain-wide across 5 stores.
+#   Event-study plot -> docs/C-causal/figures/event_study.png (committed).
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
