@@ -71,6 +71,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # run backtest (B1) — uv run python -m src.forecast.backtest  (baselines on CA_3 sample, MLflow)
 # run LightGBM (B2) — uv run python -m src.forecast.models  (global recursive LGBM, same sample)
 # run SARIMA (B3)   — uv run python -m src.forecast.sarima  (per-series SARIMA, same sample; ~2m20s)
+# run intervals (B4)— uv run python -m src.forecast.intervals  (conformal coverage eval; ~40s)
 # mlflow ui         — uv run mlflow ui --backend-store-uri sqlite:///mlruns.db  (view runs)
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
@@ -109,6 +110,15 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   falls back. Result: RMSSE 0.734 / WMAPE 0.696 — a TIE with ets (0.735); both classical
 #   per-series methods plateau ~0.735 while global LightGBM v2 (0.727) wins. The plateau IS the
 #   finding (pooling beats isolation; the specific per-series method barely matters). ~2m20s.
+# Intervals (B4, src/forecast/intervals.py): THE deliverable. Split conformal wrapping v2, adapted
+#   two ways: (1) per-horizon calibration (h=1..28) since recursive error compounds; (2) scale-
+#   normalised residuals (resid/sqrt(naive_scale)) so bands track each series' volatility. Signed
+#   tails => asymmetric (default) vs symmetric mode; conservative finite-sample quantiles (err wide).
+#   Time-ordered split: calibrate on earlier origins, TEST coverage on held-out latest origin (no
+#   leakage). Result @ target 90%: asymmetric coverage 0.912 / width 5.10; symmetric 0.905 / 4.49 —
+#   calibrated. Coverage is MARGINAL (over series), not per-series conditional (named limitation).
+#   EnbPI (online TS-correct upgrade) + quantile regression (muddy under recursion) NAMED not built.
+#   Exchangeability caveat named. MLflow logs coverage + per-h coverage/width.
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)

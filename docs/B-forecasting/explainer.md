@@ -345,3 +345,110 @@ optimisation, so asserting exact numbers would be brittle.
   `test_keys.index`, non-negative, and finite.
 - **Name encodes the order** — `sarima_111_100_7`, so the MLflow run is self-describing and
   distinct from ETS.
+
+---
+
+## B4 — Prediction intervals: the deliverable
+
+**What B4 is:** the point of the whole forecasting half. A point forecast of "42 units" is a
+guess; a planner staffs and stocks against a *range* with a known reliability — "80–95% of the
+time demand lands in [30, 58]." So B4 wraps the B2 winner (`lightgbm_global_v2`) in a
+**calibrated 90% interval** and then *proves* the calibration by measuring empirical coverage on a
+held-out future origin. The interval is what's defended in an interview; the point estimate is
+just its centre (see `intervals.py`).
+
+### The method: split conformal, adapted for this setting
+
+**Conformal prediction** is the lead choice for one reason: a **distribution-free coverage
+guarantee**. It makes no assumption about the shape of the error — it turns a pile of past
+residuals into a band that (under its assumptions) contains the truth 90% of the time, wrapped
+around *any* point model. But vanilla split conformal — pool all residuals, take one quantile —
+is wrong twice for our problem, and fixing both is the substance of B4:
+
+**1. Per-horizon calibration (because error compounds).** B2 is recursive, so day-28's forecast
+is shakier than day-1's. One residual pool would give every horizon the same width — too narrow
+late, too wide early. So we calibrate a **separate residual quantile for each horizon step
+h = 1..28**. The band is allowed to widen with h, matching the recursion's own growing
+uncertainty — the interval finally *quantifies* the error-compounding that B2's recursion honestly
+incurs.
+
+**2. Scale-normalised residuals (because series span orders of magnitude).** A residual of ±5
+units is nothing for a series selling 200/day and enormous for one selling 3/day. Pooling raw
+residuals sizes the band for the average series — useless for both extremes. So each residual is
+divided by that series' **scale** (`sqrt(naive_scale)` — the RMSSE denominator's root, the series'
+typical one-step move, reusing the B1 metric) *before* pooling; we calibrate in scaled space, then
+multiply the offset back by each series' own scale. One calibration, per-series-sized bands: wide
+for fast movers, tight for slow ones.
+
+The nonconformity score is the scaled residual. **Asymmetric mode** (default) calibrates the two
+tails independently (α/2 each) on *signed* scaled residuals, so a right-skewed demand residual
+yields a band wider above than below — the honest shape and the hook for the asymmetric-cost
+point. **Symmetric mode** uses one offset from `|scaled residual|`. Quantiles use conservative
+rounding (`method="higher"/"lower"`) — the finite-sample conformal adjustment that errs *slightly
+wide* so coverage isn't lost to interpolation on a small calibration set.
+
+### The exchangeability caveat (named, not buried)
+
+Conformal's guarantee assumes calibration and test residuals are **exchangeable** — which time
+series violate (temporal dependence, drift). We don't paper over it:
+
+- **Time-ordered split.** Calibrate on the *earlier* origins, evaluate coverage on the *latest*
+  origin — calibrate on the past, test on the future, never the reverse. (Using future origins to
+  calibrate a past band would be leakage of the same family B1 forbids.)
+- **We report *empirical* coverage** on that held-out future origin, not the theoretical
+  guarantee. If exchangeability were badly broken, coverage would miss 90% — the test is the proof.
+- **EnbPI** (ensemble batch prediction intervals) is the **time-series-correct upgrade**: a
+  bootstrap ensemble with leave-one-out residuals updated *online* as actuals arrive, needing no
+  held-out calibration set. Named as the next step, not built — the split-conformal version
+  already demonstrates calibrated coverage on this data.
+- **Quantile regression** (LightGBM `objective="quantile"` at α/2 and 1−α/2) is the adaptive-width
+  alternative. Named, not built — and for a good, defensible reason: under *recursive* forecasting
+  its quantiles are muddy. A quantile model fed its *own point predictions* as lags no longer emits
+  a true predictive quantile (the fed-in lags are a single path, not a distribution). Conformal
+  wraps the existing point model cleanly and sidesteps that entirely.
+
+### Coverage result (calibrate on 3 origins, test on the held-out latest, 200-series CA_3)
+
+| mode | empirical coverage | mean width | target |
+|---|---|---|---|
+| **asymmetric** | **0.912** | 5.10 | 0.90 |
+| symmetric | 0.905 | 4.49 | 0.90 |
+
+**Both land on target** — the interval is genuinely calibrated on a future origin the calibration
+never saw. Coverage sits a hair *above* 90% because the finite-sample rounding is deliberately
+conservative; that's the honest direction to miss (slightly wide beats silently under-covering).
+Symmetric is tighter here (4.49 vs 5.10) but asymmetric is the default: it reflects the real
+right-skew of demand residuals and is the natural place to later fold in the asymmetric cost
+(under-forecasting a fast mover usually hurts more than over-forecasting) by shifting the tail
+levels — the band is data-calibrated first, cost-shaped second.
+
+**Honest note on horizon width.** The per-horizon machinery is justified and the band *does* widen
+with h (days 1–7: width 4.95 → days 22–28: 5.16, asymmetric), but the growth is **modest** — and
+that traces straight back to B2's ablation. v2 deliberately dropped `lag_1`, the feature that
+compounds recursive error fastest; the payoff shows up *twice*, in the better point score **and**
+in a flatter horizon-error curve. A model that leaned on `lag_1` would show far steeper widening,
+and the per-horizon calibration would matter more. Keeping it is cheap insurance that reads the
+error structure correctly either way.
+
+### A named limitation: marginal vs conditional coverage
+
+The 90% is **marginal** — averaged over series. It does *not* guarantee 90% for every individual
+series (a specific slow mover might be systematically under- or over-covered). Scale-normalisation
+narrows that gap substantially (bands track each series' volatility) but doesn't close it; true
+per-series conditional coverage needs per-series calibration, which our ~3 residuals-per-horizon
+per series can't support. Stated plainly rather than hidden — the D2 dashboard's segment view is
+where this would surface for a planner.
+
+### What's tested (B4)
+
+The interval, not the point forecast, is the deliverable, so its **coverage** is what must be
+right — tested on controlled synthetic residuals where the answer is known.
+
+- **Coverage hits target** — calibrate on one draw from a known distribution, evaluate on an
+  independent draw: empirical coverage lands in [0.88, 0.93] around the 90% target.
+- **Bands are ordered and non-negative** — `upper ≥ lower ≥ 0` (sales can't be negative).
+- **Width scales with series scale** — same `yhat`, 4× scale → ~4× band width.
+- **Per-horizon widths diverge** — tight residuals at h=1, wide at h=28 → the h=28 band is >3×
+  wider, proving the per-horizon calibration works.
+- **`series_scale`** — reuses `naive_scale`'s root, floors flat/degenerate series above 0.
+- **`coverage_report`** — counts covered/uncovered correctly, overall and per horizon.

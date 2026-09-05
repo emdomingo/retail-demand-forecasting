@@ -293,3 +293,89 @@ Append-only across B1–B4. Self-quiz: recall, predict-the-decision, spot-the-fl
     *model* changes between runs. Different series populations (harder/easier mixes, different
     volume distributions) make the RMSSE numbers incomparable. Sample size is a **runtime** choice
     that must be held **identical** across models; scale *all* models together or none.
+
+---
+
+## B4 — Prediction intervals: the deliverable
+
+**Recall**
+1. Why is conformal prediction the *lead* interval method — what does it guarantee, and what does
+   it assume about the error distribution?
+2. What two adaptations does B4 make to vanilla split conformal, and what problem does each solve?
+3. What is the nonconformity score here, and how is a raw band offset turned into a per-series
+   band width?
+4. How is the calibration/test split arranged across origins, and why that direction?
+
+**Predict-the-decision**
+5. Asymmetric vs symmetric mode — what's the difference, which is the default, and why?
+6. We *name* EnbPI and quantile regression but *build* neither. Give the honest reason for each.
+7. Coverage came back at 0.912 against a 0.90 target. Is missing high a problem? What causes it?
+8. The band barely widens across the 28-day horizon. Isn't the per-horizon calibration then
+   pointless — and what does the flat curve actually tell you about the model?
+
+**Spot-the-flaw**
+9. A teammate calibrates conformal on *all four* origins (including the latest) and reports 90%
+   coverage on that same set. What's wrong?
+10. Someone pools raw (unscaled) residuals across all 200 series and reports 90% marginal
+    coverage, concluding "every series is 90% covered." Which word is doing dishonest work?
+11. To tighten the bands, a colleague proposes training LightGBM with `objective="quantile"` at
+    0.05/0.95 and using those as the interval, dropping conformal. What breaks under our recursive
+    forecaster?
+12. A band for a slow-moving item comes out as `[0, 0]` on several days. Bug or defensible, and
+    what produced it?
+
+---
+
+### Answers — B4
+
+1. It gives a **distribution-free coverage guarantee** — a band that contains the truth 1−α of the
+   time, wrapped around *any* point model, with **no assumption** about the error's shape. Its one
+   assumption is **exchangeability** of calibration and test residuals (which time series strain).
+2. **(a) Per-horizon calibration** — a separate residual quantile per step h=1..28, because the
+   recursive forecast's error compounds, so late horizons need wider bands than early ones. **(b)
+   Scale-normalised residuals** — divide each residual by the series' scale (`sqrt(naive_scale)`)
+   before pooling, so a band is sized to each series' own volatility rather than the average.
+3. The **scaled residual** (`resid / series_scale`) is the score; we take its per-horizon quantile
+   in scaled space, then **multiply the offset back by each row's series scale** to get a band in
+   that series' real units. One calibration → per-series-sized widths.
+4. Calibrate on the **earlier** origins, evaluate coverage on the **latest** (held-out future)
+   origin — calibrate on the past, test on the future. The reverse (future residuals sizing a past
+   band) would be leakage; and reporting coverage on a future origin is the actual proof the
+   guarantee survives the exchangeability strain.
+5. **Asymmetric** calibrates the two tails independently (α/2 each) on *signed* scaled residuals →
+   a band wider above than below when demand residuals are right-skewed. **Symmetric** uses one
+   offset from `|scaled residual|`. Asymmetric is the **default**: it reflects demand's real skew
+   and is where an asymmetric *cost* would later be folded in (by shifting the tail levels).
+6. **EnbPI** is the time-series-correct upgrade (bootstrap ensemble, online leave-one-out
+   residuals, no held-out set) — but split conformal already demonstrates calibrated coverage
+   here, so it's named as the next step, not built. **Quantile regression** is muddy under
+   *recursion*: a quantile model fed its own point predictions as lags emits a quantile of a single
+   fed-in path, not a true predictive quantile — so it's named, and conformal (which wraps the
+   point model cleanly) is used instead.
+7. Not a problem — it's the **safe** direction. Slightly over-covering (wider) beats silently
+   under-covering. The cause is deliberate: the finite-sample quantile uses conservative rounding
+   (`method="higher"/"lower"`), which errs a touch wide on a small calibration set.
+8. Not pointless — it's **cheap insurance that reads the error structure correctly**, and here it
+   correctly reports that the structure is nearly flat. The flat curve is a *result*, tracing to
+   B2's ablation: v2 dropped `lag_1`, the feature that compounds recursive error fastest, so its
+   horizon-error barely grows. A model that kept `lag_1` would show steep widening and the
+   per-horizon calibration would earn its keep visibly.
+9. **Leakage / no held-out test.** Calibrating on the latest origin and scoring coverage on the
+   same residuals is in-sample — the band is fitted to the very points it's evaluated on, so 90%
+   is guaranteed by construction and proves nothing about a future origin. The honest test holds
+   the latest origin out.
+10. **"Every."** The 90% is **marginal** (averaged over series); it says nothing about any
+    *individual* series, which may be systematically under- or over-covered. Worse, unscaled
+    pooling sizes the band for the average series, so slow movers are over-covered and fast movers
+    under-covered — the marginal number hides both. Scaling narrows the gap; it doesn't grant
+    conditional coverage.
+11. Under recursion the quantile model is fed its **own point predictions** as lag features — a
+    single realised path, not a distribution — so its output isn't a genuine predictive quantile
+    and the resulting "interval" has no coverage meaning. (It would be valid in a *direct*
+    per-horizon model that never feeds predictions back.) Conformal avoids this by calibrating on
+    realised residuals of the actual recursive forecast.
+12. **Defensible.** A very slow mover can have `yhat ≈ 0` and a small scaled offset; the lower
+    bound clips at 0 (sales can't be negative) and the upper can round to 0 on a near-zero-demand
+    day. It's the honest "we expect ~no sales here" band, not a bug — and if it *under-covers* a
+    spiky slow item, that's exactly the marginal-vs-conditional limitation surfacing (a D2
+    segment-view concern).
