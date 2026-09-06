@@ -137,6 +137,28 @@ def load_weekly_panel(store: str = STORE, dept: str = DEPT) -> pd.DataFrame:
     return weekly[weekly["has_price"] == 1].copy()
 
 
+def detect_cut(
+    weekly: pd.DataFrame,
+    treated: str = TREATED,
+    min_drop: float = -0.10,
+    year_max: int = 2012,
+) -> pd.Timestamp:
+    """Find the treated item's price-cut week straight from its weekly price path.
+
+    C2b replicates the cut across five stores, and the chain rolled it out a week apart
+    (CA_3 on 2011-08-08, the others on 2011-08-15). Hardcoding one date would misdate the
+    others by a week — putting a genuinely pre-cut week into the post period and biasing those
+    estimates toward zero — so each store detects its own cut: the first >=10% price drop in
+    the intervention era.
+    """
+    t = weekly[weekly["item_id"] == treated].sort_values("week")
+    pc = t["price"].pct_change()
+    hits = t[(pc <= min_drop) & (t["week"].dt.year <= year_max)]
+    if hits.empty:
+        raise ValueError(f"no price cut <= {min_drop:.0%} found for {treated} before {year_max}")
+    return pd.Timestamp(hits.iloc[0]["week"])
+
+
 # --------------------------------------------------------------------------- #
 # Control selection: matched, price-stable, actually-selling.
 # --------------------------------------------------------------------------- #
@@ -173,6 +195,8 @@ def select_controls(
             continue
         s = g.set_index("week")["units"].reindex(treated_pre.index)
         if s.notna().sum() < pre_weeks // 2:  # need enough overlapping pre-weeks to judge co-move
+            continue
+        if s.std(skipna=True) == 0:  # a flat (constant) candidate has no trend to correlate on
             continue
         corr = treated_pre.corr(s)
         if pd.notna(corr):

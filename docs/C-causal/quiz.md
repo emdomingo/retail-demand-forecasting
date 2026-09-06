@@ -59,3 +59,30 @@ Append-only across C1–C3. Self-quiz: recall, predict-the-decision, spot-the-fl
     takes from Parquet to the regression panel. What does it reuse, and what does it add?
 19. How does the causal layer answer the question the forecasting half can't — "why did the
     forecast miss"?
+
+---
+
+## C2b — Chain-wide replication
+
+**Recall**
+20. What makes five stores a *replication* rather than just five separate analyses? Why is
+    agreement across them stronger evidence than any single estimate?
+21. What were the results — how many of the five stores were positive, how many significant, and
+    where did the estimates cluster?
+
+**Predict-the-decision**
+22. Why does each store detect its *own* cut date instead of sharing one? What specifically goes
+    wrong if you hardcode 2011-08-08 for all five?
+23. Inverse-variance pooling weights each store by `1/SE²`. What does that achieve, and which
+    store therefore pulled the fixed-effect pool hardest?
+24. The write-up quotes the *random-effects* pooled CI, not the fixed-effect one. What drove that
+    choice, and what does the random-effects model add to the weights?
+
+**Spot-the-flaw**
+25. A colleague reports the headline as "+61.1%, 95% CI [+46%, +78%]" (the fixed-effect pool). Why
+    is that CI misleadingly narrow here? What statistic tells you so?
+26. TX_1 shows ~+100% while the others sit at +41–50%. Someone says "drop TX_1, it's an outlier
+    distorting the average." Is that the right move? What does I²=57% actually tell you to do
+    instead?
+27. Why is the staggered-adoption panel DiD (the "average effect across 632 cuts" version) named
+    but *not built*? What bias would a naive TWFE on staggered cuts risk?

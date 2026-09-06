@@ -134,3 +134,71 @@ the causal branch and the forecast branch are parallel consumers of one query la
 (effect + CI + event-study plot) feeds the D3 dashboard panel. And the framing closes the loop
 with B: when a forecast misses because a planner cut a price, *this* is the machinery that
 quantifies why.
+
+---
+
+## C2b — Chain-wide replication (five stores)
+
+**What C2b is:** the same DiD, re-run in each of the five stores that made the identical cut, and
+combined into one answer to the only question that matters for a single noisy estimate — *does it
+reproduce?* It lives in `src/causal/replication.py`.
+
+### Why replication is the real evidence
+
+C2's honest weakness is structural: one treated series, ~27 pre-weeks, pre-trends that aren't
+pristine. No amount of cleverness on *one* store fixes that. But the cut was chain-wide — the same
+item dropped $3.58 → $2.98 in the same fortnight in CA_3, CA_1, TX_1, TX_2, CA_4 — so we get five
+*independent* natural experiments. Five estimates that agree are worth far more than one, because
+the thing that could bias any single store (a local stockout, a coincident local promo, a noisy
+control set) won't line up the same way across five. Agreement is the falsification test one store
+can't run on itself.
+
+### One decision that had to be right: detect the cut per store
+
+The chain rolled the cut out a week apart — **CA_3 on 2011-08-08, the other four on 2011-08-15**.
+Hardcoding a single date would have put a genuinely *pre-cut* week into the post period for four
+stores, dragging those estimates toward zero. So each store detects its own cut from its own price
+path (`detect_cut`: first ≥10% drop in the intervention era) and builds its own matched controls.
+This is the kind of one-line assumption that silently corrupts a result — checked, not assumed.
+
+### The result
+
+| store | cut | lift | 95% CI |
+|-------|-----|-----:|--------|
+| CA_3 | 2011-08-08 | +42.1% | [+12.5%, +79.4%] |
+| CA_1 | 2011-08-15 | +41.1% | [+11.8%, +77.9%] |
+| TX_1 | 2011-08-15 | +99.8% | [+68.3%, +137.2%] |
+| TX_2 | 2011-08-15 | +47.9% | [+17.6%, +86.1%] |
+| CA_4 | 2011-08-15 | +49.7% | [+12.8%, +98.7%] |
+
+**5/5 positive, 5/5 individually significant.** Four stores cluster tightly at +41–50%; TX_1 (the
+thinnest store, 15 units/wk pre-cut) is a genuine outlier at ~+100%. The effect *reproduces* — and
+the disciplined C2 headline (+42%) turns out to be at the *low* end of the chain, not a fluke.
+
+### Pooling honestly: fixed vs random effects
+
+Combining the five uses **inverse-variance meta-analysis** — weight each store by its precision
+(`1/SE²`), so a tight estimate counts more. But that (fixed-effect) pool assumes every store shares
+*one* true effect; TX_1 says otherwise. The heterogeneity statistics quantify it: **Cochran's Q =
+9.2 (p = 0.06), I² = 57%** — over half the variance is genuine between-store spread, not sampling
+noise. So the fixed-effect CI (+61%, [+46%, +78%]) is *too narrow* — it trusts an agreement that
+isn't fully there.
+
+The right response is a **random-effects (DerSimonian–Laird)** pool, which adds the estimated
+between-store variance τ² to every weight, widening the interval to reflect the disagreement:
+**+56.9%, 95% CI [+34.6%, +82.9%]**. That is the number to quote. Reporting the FE point and hiding
+the heterogeneity would be exactly the kind of overclaim the project's guardrails forbid.
+
+### The takeaway
+
+The price cut robustly and significantly lifted demand across the whole chain — a large effect
+(≈ +40–50% in most stores, elasticity ≈ −2.5 to −3), reproduced five times. The *magnitude* varies
+by store (TX_1 markedly more price-sensitive), which the random-effects CI states plainly rather
+than papering over. This is the difference between "I found an effect in my one example" and "the
+effect holds up when the design is stress-tested" — the latter is what survives interview scrutiny.
+
+The generalisable next step (a panel / staggered-adoption TWFE across the 632-candidate cut
+shortlist, reporting an *average* price-cut effect) is **named, not built** — SPEC C2b's optional
+stretch — because staggered TWFE carries its own well-known biases (the Goodman-Bacon / de
+Chaisemartin critique) that would need the modern estimators to do right, and the five-store
+replication already delivers the "more than one case" evidence honestly.

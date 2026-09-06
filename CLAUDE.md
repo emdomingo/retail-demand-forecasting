@@ -73,6 +73,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # run SARIMA (B3)   — uv run python -m src.forecast.sarima  (per-series SARIMA, same sample; ~2m20s)
 # run intervals (B4)— uv run python -m src.forecast.intervals  (conformal coverage eval; ~40s)
 # run DiD (C2)      — uv run python -m src.causal.did  (price-cut DiD + event study + placebo; ~9s)
+# run replication   — uv run python -m src.causal.replication  (C2b: 5-store DiD + meta-analysis; ~30s)
 # mlflow ui         — uv run mlflow ui --backend-store-uri sqlite:///mlruns.db  (view runs)
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
@@ -131,6 +132,16 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   though noisy -27.7% point). Few-cluster SE understates uncertainty -> wild bootstrap NAMED not
 #   built. Single-store estimate is noisy BY DESIGN -> C2b replicates chain-wide across 5 stores.
 #   Event-study plot -> docs/C-causal/figures/event_study.png (committed).
+# Replication (C2b, src/causal/replication.py): same DiD re-run across the 5 stores that made the
+#   identical chain-wide cut (CA_3/CA_1/TX_1/TX_2/CA_4). Per-store cut DETECTED (chain rolled it
+#   out a week apart: CA_3 08-08, rest 08-15 — hardcoding one date would bias 4 toward zero) +
+#   per-store matched controls. Pool = inverse-variance meta-analysis, fixed AND random effects
+#   (DerSimonian-Laird). Result: 5/5 positive, 5/5 significant; 4 stores +41-50%, TX_1 outlier
+#   ~+100% (thinnest store). Heterogeneity Q=9.2 (p=0.06), I^2=57% => quote the RANDOM-effects
+#   pool +56.9% [+34.6%, +82.9%], NOT the too-narrow fixed +61.1% [+46%, +78%]. Replication IS the
+#   credibility (neutralises C2's thin pre-period). Staggered-adoption panel TWFE across the 632
+#   cuts = NAMED not built (Goodman-Bacon/de Chaisemartin bias needs modern estimators). Forest
+#   plot -> docs/C-causal/figures/replication_forest.png. ~30s.
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
