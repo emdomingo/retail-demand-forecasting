@@ -86,3 +86,34 @@ Append-only across C1–C3. Self-quiz: recall, predict-the-decision, spot-the-fl
     instead?
 27. Why is the staggered-adoption panel DiD (the "average effect across 632 cuts" version) named
     but *not built*? What bias would a naive TWFE on staggered cuts risk?
+
+## C3 — SNAP demand lift (cross-state counterfactual)
+
+**Recall**
+28. Why can't the SNAP effect be measured with Difference-in-Differences? Name both properties of
+    SNAP that break DiD's requirements.
+29. What single fact about SNAP makes a cross-state control group valid? Why is a Texas store a
+    legitimate control for a California store on a CA SNAP day?
+30. What was the headline SNAP-day lift, and how far did the cross-state controls discipline it
+    down from the naive gap? What happened to R² across the ladder?
+
+**Predict-the-decision**
+31. The main spec includes `tx_snap` and `wi_snap` as covariates even though TX/WI demand is
+    already in the model. Why are the raw SNAP flags needed on top of the demand series? What
+    specifically goes wrong on overlap days if you omit them?
+32. Why HAC (Newey–West) standard errors instead of ordinary OLS SEs? What is the C2 analogue of
+    this choice?
+33. The outcome is FOODS-category demand, not all-category store demand. Why scope to FOODS, and
+    what would using total demand cost you?
+
+**Spot-the-flaw**
+34. A colleague reports the naive SNAP-day lift (+16.8%) as the causal effect. What is the single
+    biggest thing that number fails to account for, and roughly how much does it overstate?
+35. The placebo regresses a *control* state's demand on `ca_snap`, but uses the *other* control
+    state (not CA) as its cross-state predictor. Why must CA be excluded from the placebo's
+    right-hand side? What would including it do to the placebo?
+36. The clean-day estimator uses only ~128 CA-only SNAP days and throws away the overlap days —
+    far less data. Why is that a *strength* of that particular check rather than a weakness, and
+    what does its agreement with the full-sample estimate buy you?
+37. Why is CausalImpact / BSTS *named but not built* here, when it is the canonical method for this
+    kind of question? What does the OLS regression give up, and what does it gain?

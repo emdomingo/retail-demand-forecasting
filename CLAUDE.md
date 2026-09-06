@@ -74,6 +74,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # run intervals (B4)— uv run python -m src.forecast.intervals  (conformal coverage eval; ~40s)
 # run DiD (C2)      — uv run python -m src.causal.did  (price-cut DiD + event study + placebo; ~9s)
 # run replication   — uv run python -m src.causal.replication  (C2b: 5-store DiD + meta-analysis; ~30s)
+# run SNAP (C3)     — uv run python -m src.causal.snap  (cross-state regression counterfactual; ~15s)
 # mlflow ui         — uv run mlflow ui --backend-store-uri sqlite:///mlruns.db  (view runs)
 # melt demo (A1)    — uv run python -m src.ingest.load   (loads 3 CSVs, melts to ~59M long rows)
 # features demo (A2)— uv run python -m src.ingest.features  (lags + rolling means; leakage-safe)
@@ -142,6 +143,19 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   credibility (neutralises C2's thin pre-period). Staggered-adoption panel TWFE across the 632
 #   cuts = NAMED not built (Goodman-Bacon/de Chaisemartin bias needs modern estimators). Forest
 #   plot -> docs/C-causal/figures/replication_forest.png. ~30s.
+# SNAP (C3, src/causal/snap.py): second causal method on the second intervention. SNAP breaks DiD
+#   (recurring monthly pulse => no clean pre-period; store-wide => no in-store control), so the
+#   counterfactual is CROSS-STATE: SNAP schedules differ by state, so on a CA SNAP day TX/WI stores
+#   are live controls for "CA without its SNAP boost". OLS on log daily FOODS units @ CA_3, HAC
+#   (Newey-West, 14 lags) SEs. This IS the CausalImpact/BSTS idea in transparent OLS form (BSTS =
+#   named Bayesian sibling, not built -> avoids tfcausalimpact/TF friction). Estimate ladder: naive
+#   +16.8% -> calendar +16.9% -> cross-state +10.7% [+9.1,+12.3] (R^2 0.12->0.93; disciplined down
+#   ~a third, same lesson as C2). Include tx_snap/wi_snap as covariates (CA/TX/WI SNAP windows
+#   overlap early-month: 384/640 CA days coincide) to net out control-state SNAP. Falsifications:
+#   placebos (CA schedule as fake treatment on TX/WI) both cover 0 (PASS); clean-day estimator (128
+#   CA-only SNAP days vs no-SNAP days) +11.8% corroborates. Caveats: average (not one-off) lift,
+#   anticipation/pantry-loading, asymptotic HAC SE. Figure -> docs/C-causal/figures/
+#   snap_counterfactual.png. ~15s. Closure (Christmas, 0 units) days dropped (log(0)).
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
@@ -151,7 +165,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 - **Scope the model to one store** (or one category). State it explicitly.
 - **Backtesting: rolling-origin only.** No future leakage. Build the harness (B1) before any model; score everything against seasonal-naive.
 - **Intervals: conformal-led** (coverage guarantee), EnbPI as the time-series-correct variant, quantile regression as the adaptive alternative.
-- **Causal: price-cut DiD + SNAP CausalImpact.** SNAP has no within-store control group, so it cannot use DiD — it goes to CausalImpact's modelled counterfactual.
+- **Causal: price-cut DiD (C2/C2b) + SNAP cross-state regression counterfactual (C3).** SNAP has no within-store control group and no clean pre-period, so it cannot use DiD; instead cross-state controls (TX/WI, on different SNAP schedules) drive an OLS counterfactual for the average SNAP-day lift. CausalImpact/BSTS is the named Bayesian sibling of that same idea, not built (avoids the tfcausalimpact/TensorFlow dependency friction). See SPEC C3.
 - **MLflow in B1**, tracking every backtest run — it's the one MLOps tool that earns its place, because it makes the "compare families and defend a choice" comparison reproducible. The rest of the production surface (real ingestion, drift monitoring, retraining) is **named in the E1 README, not built** — scoping judgment reads as maturity, and faking a live feed over static M5 data would undercut the scrutiny bar. See the "Production considerations" section in SPEC.md.
 
 ## Guardrails

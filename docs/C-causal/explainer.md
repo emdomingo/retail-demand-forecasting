@@ -202,3 +202,98 @@ shortlist, reporting an *average* price-cut effect) is **named, not built** — 
 stretch — because staggered TWFE carries its own well-known biases (the Goodman-Bacon / de
 Chaisemartin critique) that would need the modern estimators to do right, and the five-store
 replication already delivers the "more than one case" evidence honestly.
+
+## C3 — SNAP demand lift (cross-state regression counterfactual)
+
+The second causal method on the second intervention. C2/C2b measured a **price cut** with
+Difference-in-Differences. This measures **SNAP** — the days each month when food-assistance
+benefits are disbursed — and it deliberately uses a *different* method, because SNAP breaks both
+things DiD needs.
+
+### Why DiD cannot be reused here
+
+- **No clean pre-period.** SNAP is not a one-off onset with a before and an after; it is a
+  *recurring monthly pulse* present across the entire 2011–16 window. There is no "pre-SNAP" era
+  to difference against.
+- **No in-store control group.** SNAP eligibility is store-wide — every item in a CA store faces
+  the same CA SNAP calendar — so there is no untreated twin *inside* the store the way the price
+  cut had non-cutting neighbours.
+
+SPEC C3 reframes the estimand accordingly: not a single-onset effect but the **average SNAP-day
+lift**.
+
+### The idea that rescues identification: schedules differ by state
+
+The one fact that makes a counterfactual possible: **SNAP disbursement days differ by state.**
+California, Texas and Wisconsin pay on overlapping-but-distinct days. So on a CA SNAP day, the TX
+and WI stores are a live control for *what CA demand would look like today without its SNAP boost*
+— they share the day-of-week, the holidays, the season, the macro demand wave, but not CA's SNAP
+schedule.
+
+That is exactly the CausalImpact / BSTS idea — predict the treated series from control series and
+read the effect off the gap — done here as a transparent OLS regression instead of a Bayesian
+structural time-series model. CausalImpact is the **named Bayesian sibling** (SPEC's "second named
+method"); we build the regression form because it needs no fragile heavy dependency (the
+tfcausalimpact/TensorFlow friction we avoided with pmdarima in B3) and every coefficient defends by
+hand.
+
+### The model — a cross-state regression counterfactual, on log FOODS units
+
+Outcome = log daily **FOODS** units at CA_3 (SNAP is *food* assistance, so we measure the food
+category, not all-categories which would dilute it; log so the coefficient reads as a percentage).
+The estimate is built as a **ladder**, each rung adding controls:
+
+| spec | controls | lift | 95% CI | R² |
+|------|----------|-----:|--------|---:|
+| naive | none | +16.8% | [+12.9%, +20.9%] | 0.035 |
+| calendar | day-of-week | +16.9% | [+13.0%, +20.8%] | 0.119 |
+| **cross-state** | **+ log TX, log WI demand, TX/WI SNAP flags** | **+10.7%** | **[+9.1%, +12.3%]** | **0.928** |
+
+The cross-state controls take R² from 0.12 to **0.93** and discipline the estimate from +16.8% to
+**+10.7%** — the naive gap overstates by ~57%, the same lesson as the C2 price cut (raw +56% →
+disciplined +42%). The disciplining *is* the method's value.
+
+Two design gates behind that main row:
+
+1. **Control for the control states' own SNAP.** CA/TX/WI SNAP windows overlap heavily (all pay
+   early-month — 384 of CA's 640 SNAP days coincide with a TX and WI SNAP day). On those overlap
+   days TX/WI demand is *itself* SNAP-lifted, which would soak up part of CA's effect. Including
+   `tx_snap` and `wi_snap` as covariates nets that out so `ca_snap` isolates CA's own lift.
+2. **HAC (Newey–West) standard errors.** Daily demand is strongly autocorrelated; plain OLS SEs
+   would be far too small. HAC with a two-week lag window is the time-series analogue of C2's
+   cluster-robust SEs.
+
+### The evidence the number is real
+
+Two falsifications, mirroring the C2 placebo:
+
+- **Placebos.** Apply CA's SNAP schedule as a *fake* treatment to a control state, under the same
+  spec (control state as outcome, the *other* control state as its cross-state predictor — never
+  CA, which is contaminated by the fake treatment). Both return nulls: placebo→TX −1.8%
+  [−4.2%, +0.7%], placebo→WI +3.0% [−0.3%, +6.3%], both CIs covering zero. So `ca_snap` is not
+  picking up a generic early-month calendar wave common to all states — it is CA's own SNAP lift.
+- **Clean-day estimator.** Restrict to the ~128 days when *only* CA is on SNAP (TX and WI
+  genuinely untreated) versus days when *no* state is. This drops the overlap days entirely, so the
+  controls are true controls by construction — no modelling of co-scheduled SNAP needed. It gives
+  **+11.8% [+9.7%, +14.0%]**, corroborating the full-sample +10.7% and confirming the overlap-day
+  contamination is handled right.
+
+### Honest limitations
+
+- **Average, not one-off.** The recurring-treatment framing means this is an *average* SNAP-day
+  lift, not a single-onset effect. Stated as such.
+- **Anticipation / pantry-loading.** Households may shop just before or after a SNAP day, smearing
+  the effect across adjacent days; a sharp one-day indicator would under- or over-count that.
+- **HAC SEs are asymptotic.** As with C2's few-cluster SEs, the interval is approximate.
+- **Named, not built:** the fully Bayesian counterfactual (CausalImpact / BSTS) and a
+  synthetic-control donor-weighting of the states — both would sharpen the counterfactual without
+  changing the story.
+
+### How C3 fits the whole
+
+Feature C now carries **two methods × two interventions**: DiD on the price cut (C2/C2b) and a
+cross-state regression counterfactual on SNAP (C3) — a genuine robustness pairing rather than one
+trick applied twice. Both tell the same disciplining story (the naive gap overstates; a proper
+counterfactual shrinks it and survives a placebo), which is the causal half of the project's anchor:
+when actuals diverge from the forecast, *why* — and by how much that a real intervention actually
+caused. Figure: `docs/C-causal/figures/snap_counterfactual.png`.
