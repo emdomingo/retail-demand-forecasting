@@ -169,6 +169,23 @@ def coverage_report(banded: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
     return summary, per_h
 
 
+def calibrate_and_band(
+    ff: pd.DataFrame, alpha: float = 0.1, mode: str = "asymmetric"
+) -> tuple[pd.DataFrame, pd.Timestamp]:
+    """Time-ordered conformal split shared by the evaluator and the persistence layer: calibrate
+    on every origin *before* the latest, band the held-out latest origin. Returns the banded
+    test-origin frame (with ``lower``/``upper``/``width``) and the test origin. Calibrate on the
+    past, test on the future, never the reverse — no leakage."""
+    origins = np.sort(ff["origin"].unique())
+    if len(origins) < 2:
+        raise ValueError("Need >=2 origins: earlier ones calibrate, the latest one tests.")
+    test_origin = origins[-1]
+    cal = ff[ff["origin"] < test_origin]
+    test = ff[ff["origin"] == test_origin]
+    banded = SplitConformal(alpha=alpha, mode=mode).fit(cal).apply(test)
+    return banded, pd.Timestamp(test_origin)
+
+
 def evaluate_conformal(
     df: pd.DataFrame,
     model,
@@ -181,16 +198,7 @@ def evaluate_conformal(
     Time-ordered split — calibrate on the past, test on the future, never the reverse."""
     cfg = cfg or BacktestConfig()
     ff = origin_forecasts(df, model, cfg)
-    origins = np.sort(ff["origin"].unique())
-    if len(origins) < 2:
-        raise ValueError("Need >=2 origins: earlier ones calibrate, the latest one tests.")
-
-    test_origin = origins[-1]
-    cal = ff[ff["origin"] < test_origin]
-    test = ff[ff["origin"] == test_origin]
-
-    conf = SplitConformal(alpha=alpha, mode=mode).fit(cal)
-    banded = conf.apply(test)
+    banded, test_origin = calibrate_and_band(ff, alpha=alpha, mode=mode)
     summary, per_h = coverage_report(banded)
 
     mlflow.set_tracking_uri(cfg.tracking_uri or DEFAULT_TRACKING_URI)
@@ -203,8 +211,8 @@ def evaluate_conformal(
                 "alpha": alpha,
                 "target_coverage": 1 - alpha,
                 "base_model": getattr(model, "name", "unknown"),
-                "cal_origins": len(origins) - 1,
-                "test_origin": pd.Timestamp(test_origin).date().isoformat(),
+                "cal_origins": int(ff["origin"].nunique()) - 1,
+                "test_origin": test_origin.date().isoformat(),
                 "n_series": int(df["id"].nunique()),
                 **cfg.extra_params,
             }

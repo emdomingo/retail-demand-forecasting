@@ -82,7 +82,8 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # build store (A4)  — uv run python -m src.ingest.feature_store  (full pipeline -> Parquet, ~2-3 min)
 # read slice (A4)   — uv run python -m src.query.slices  (DuckDB slice-read demo)
 #   in code: from src.query.slices import read_store_slice; df = read_store_slice("CA_3")
-# launch dashboard  — (set at D1)
+# build forecast (D1)— uv run python -m src.forecast.persist  (bands held-out origin -> Parquet+JSON)
+# launch dashboard  — uv run streamlit run src/dashboard/app.py  (D1; reads the persisted artifact)
 
 # Env facts (A0): Python 3.11 (uv-managed), Java 17 (Homebrew, for the Spark JVM),
 #   PySpark 4.2, pandas pinned <3.0 (PySpark 4.2 interop). Verify Spark: it starts a
@@ -156,6 +157,24 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   CA-only SNAP days vs no-SNAP days) +11.8% corroborates. Caveats: average (not one-off) lift,
 #   anticipation/pantry-loading, asymptotic HAC SE. Figure -> docs/C-causal/figures/
 #   snap_counterfactual.png. ~15s. Closure (Christmas, 0 units) days dropped (log(0)).
+# Dashboard D1 (src/dashboard/app.py + src/forecast/persist.py): the planner's viewing surface,
+#   forecast-vs-actual + conformal interval. DECISION: persist, don't compute (option 1) — the app
+#   is a PURE READER (imports no LightGBM/harness), so free hosting (D4) works and the shown
+#   coverage IS the backtest's. persist.py refits v2 across the 4 rolling origins, calibrates
+#   conformal (reuses intervals.calibrate_and_band, extracted from evaluate_conformal so evaluator
+#   + persister share one split), bands the HELD-OUT LATEST origin, writes two files to
+#   data/processed/forecast/ (gitignored): forecast_CA_3.parquet (5,600 rows = 200 series x 28d;
+#   sales/yhat/lower/upper/width/scale + dept/cat) + forecast_CA_3.json (model, mode, target vs
+#   EMPIRICAL coverage 0.912, mean width 5.10, origin 2016-04-24, n_series). Persists the SAME
+#   fixed 200-series sample (seed 0) as B1-B4 so the sidecar coverage == the documented B4 number
+#   (sample_size=None would forecast the whole store but then the coverage no longer matches).
+#   App: @st.cache_data over the Parquet read + a DuckDB read_store_slice for pre-origin context
+#   (56d); Altair chart (ships inside Streamlit, no new dep) = shaded band (the star) + dashed
+#   yhat + solid actual (context concatenated with horizon, drop_duplicates -> one continuous
+#   line) + red origin rule. Header shows marginal coverage; a per-series coverage metric is
+#   flagged as noisy (n=28) -> surfaces B4's marginal-vs-conditional caveat in the UI. Tests:
+#   test_persist.py (schema, sidecar==coverage_report, round-trip, missing-file error) via a df=
+#   seam on build_forecast_artifact (no feature store needed).
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
