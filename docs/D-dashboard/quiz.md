@@ -81,3 +81,83 @@ Append-only across D1–D4. Self-quiz: recall, predict-the-decision, spot-the-fl
     committed data (same rule as the feature store and MLflow db). The intended path is to
     rebuild: `uv run python -m src.forecast.persist` regenerates the artifact from the feature
     store, and `load_forecast` raises a clear "build it first" error if it's missing.
+
+---
+
+## D2 — Segment-level error panel + asymmetric-cost visual
+
+**Recall**
+1. What two metrics does the segment panel show, and how is each aggregated within a segment?
+2. How is per-series RMSSE reconstructed from the persisted artifact without re-reading training
+   history?
+3. State the newsvendor critical-ratio formula and what `Cu` and `Co` mean.
+4. What second file does D2 add to the persisted artifact, and what does it hold?
+
+**Predict-the-decision**
+5. Why does the segment panel show each segment's *unit share* next to its error, instead of just
+   the error?
+6. Ordering to the point forecast is the newsvendor optimum only in one special case — which, and
+   why does the optimal order move above the forecast when stockouts cost more?
+7. We persist a static quantile *grid* rather than shipping the `SplitConformal` calibrator into
+   the app. Give the architectural reason.
+8. The quantile grid is per-horizon (28 quantile functions, not one). Why does that matter for the
+   order quantity?
+9. The cost panel aggregates across all series, but the segment panel disaggregates. Why the
+   different altitude for each?
+
+**Spot-the-flaw**
+10. A colleague reports "our model is good — blended WMAPE is 0.6" and orders every item to `yhat`.
+    Point to the two things D2 shows that make that a risky planning decision.
+11. Someone sets the cost panel to `Cu:Co = 1:1`, sees the newsvendor policy order *less* than the
+    point forecast and still save money, and calls it a bug. Are they right? Explain.
+12. A teammate "simplifies" by reading the newsvendor order from the 90% band's upper edge for
+    every cost ratio. What breaks, and for which ratios?
+13. The cost numbers are printed as raw dollars in a screenshot. Why is that an overclaim given how
+    `policy_costs` is defined?
+
+---
+
+### Answers — D2
+
+1. **WMAPE** — pooled `Σ|sales−yhat| / Σ|sales|` over all the segment's rows. **RMSSE** —
+   computed per series (each scaled by its own history) then **averaged** within the segment. Same
+   aggregation rules as B1 (WMAPE pools, RMSSE is per-series-then-mean).
+2. The persisted `scale` is `√(naive_scale)` (the RMSSE denominator's root). So per-series
+   RMSSE = `RMSE_series / scale` = `sqrt(mean(resid²)) / scale` — computable straight from the
+   artifact's `sales`, `yhat`, `scale`. The SQL does it in an inner per-series query.
+3. `q* = Cu / (Cu + Co)`. `Cu` = underage cost (per unit **short** / stockout), `Co` = overage
+   cost (per unit **long** / overstock). Order to the `q*`-quantile of demand.
+4. `quantiles_<store>.parquet` — the per-horizon predictive-quantile function (99 quantiles × 28
+   horizons) of the scaled calibration residuals: columns `h`, `q`, `offset`. An order is
+   `yhat + scale · offset_h(q*)`.
+5. Because the error percentage alone is misleading for planning: a segment can have huge WMAPE and
+   be a trivial share of volume (the slow-mover long tail), or modest WMAPE and dominate volume.
+   Pairing error with unit share is exactly what a single headline number hides — the guardrail.
+6. Only when **`Cu = Co`** (`q* = 0.5`, order to the median). When stockouts cost more, `q* > 0.5`,
+   so you order to a higher quantile of the forecast — a safety buffer above the point forecast,
+   inside the upper half of the band — because the expected cost of being short outweighs the cost
+   of the extra stock.
+7. It keeps the dashboard a **pure reader** — no `SplitConformal` (and thus no model machinery) in
+   the app path — and makes the slider a lookup instead of a conformal recompute. Same
+   persist-don't-compute principle as D1.
+8. Recursive forecast error compounds across the horizon, so day 28 needs a wider safety buffer
+   than day 1 for the *same* service level. A single pooled quantile would under-buffer late
+   horizons and over-buffer early ones; per-horizon offsets size the order correctly per day.
+9. A store's **total ordering cost** is the planning-relevant number, so the cost panel pools all
+   series. The segment panel's entire job is to *disaggregate* — to show where error concentrates
+   — so it must break down, not pool. Different questions, different altitude, on purpose.
+10. (a) The **volume-tier breakdown**: the blended 0.6 hides that low-volume items have ~176% WMAPE
+    and high-volume items ~48% — the number describes no actual item. (b) The **asymmetric-cost
+    panel**: ordering to `yhat` ignores that stockouts usually cost more, leaving fill rate low and
+    realised cost well above the newsvendor optimum.
+11. **Not a bug.** At `1:1` the newsvendor orders to the *median*; retail demand is right-skewed, so
+    `yhat` (≈ the mean) sits above the median and slightly over-orders. Ordering to the median trims
+    that overstock, so cost falls a little and fill rate drops — the correct behaviour when the two
+    costs are equal.
+12. The 90% asymmetric band's upper edge is fixed at the **0.95 quantile**. Reading orders off it
+    ignores the slider entirely: it would over-order for any `q* < 0.95` (most ratios) and
+    *under-order* for `Cu:Co` steeper than 19:1. The order must track `q* = Cu/(Cu+Co)`, which is
+    why we persist the whole grid, not just the band edges.
+13. `policy_costs` sets `Co = 1` and `Cu =` the ratio, so cost is in **normalised units**, not
+    currency — only the *ratio* affects the order, and the absolute scale is arbitrary. Printing it
+    as dollars claims a precision the model doesn't have; the caption says "normalised units."

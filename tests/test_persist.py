@@ -81,14 +81,37 @@ def test_sidecar_coverage_matches_the_banded_frame():
     assert art.meta["target_coverage"] == pytest.approx(1 - art.meta["alpha"])
 
 
+def test_quantile_grid_is_built_and_monotone():
+    # The D2 newsvendor reads this grid; per horizon the offset must rise with q (a valid
+    # quantile function), and every horizon must be present.
+    art = _artifact()
+    q = art.quantiles
+    assert set(q.columns) == {"h", "q", "offset"}
+    assert set(q["h"].unique()) == set(range(1, art.meta["horizon"] + 1))
+    for _, g in q.groupby("h"):
+        offs = g.sort_values("q")["offset"].to_numpy()
+        assert (np.diff(offs) >= -1e-9).all()  # non-decreasing in q
+
+
 def test_persist_load_roundtrips(_tmp_forecast_dir):
     art = _artifact()
     persist_forecast(art)
     assert art.parquet_path().exists() and art.meta_path().exists()
+    assert art.quantiles_path().exists()
 
     loaded = load_forecast("TEST")
     pd.testing.assert_frame_equal(loaded.forecast, art.forecast)
+    pd.testing.assert_frame_equal(loaded.quantiles, art.quantiles)
     assert loaded.meta == art.meta
+
+
+def test_load_requires_the_quantile_grid(_tmp_forecast_dir):
+    # A forecast without its quantile grid is incomplete for D2 -> fail loudly, not silently.
+    art = _artifact()
+    persist_forecast(art)
+    art.quantiles_path().unlink()
+    with pytest.raises(FileNotFoundError, match="Build it first"):
+        load_forecast("TEST")
 
 
 def test_load_missing_artifact_raises_with_guidance():

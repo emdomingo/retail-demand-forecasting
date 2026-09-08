@@ -169,21 +169,44 @@ def coverage_report(banded: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
     return summary, per_h
 
 
-def calibrate_and_band(
-    ff: pd.DataFrame, alpha: float = 0.1, mode: str = "asymmetric"
-) -> tuple[pd.DataFrame, pd.Timestamp]:
-    """Time-ordered conformal split shared by the evaluator and the persistence layer: calibrate
-    on every origin *before* the latest, band the held-out latest origin. Returns the banded
-    test-origin frame (with ``lower``/``upper``/``width``) and the test origin. Calibrate on the
-    past, test on the future, never the reverse — no leakage."""
+def calibration_test_split(
+    ff: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Timestamp]:
+    """The time-ordered split every conformal consumer shares: every origin *before* the latest
+    calibrates, the held-out latest origin is the test set. Returns (cal, test, test_origin).
+    Calibrate on the past, test on the future, never the reverse — no leakage."""
     origins = np.sort(ff["origin"].unique())
     if len(origins) < 2:
         raise ValueError("Need >=2 origins: earlier ones calibrate, the latest one tests.")
-    test_origin = origins[-1]
-    cal = ff[ff["origin"] < test_origin]
-    test = ff[ff["origin"] == test_origin]
+    to = origins[-1]
+    return ff[ff["origin"] < to], ff[ff["origin"] == to], pd.Timestamp(to)
+
+
+def calibrate_and_band(
+    ff: pd.DataFrame, alpha: float = 0.1, mode: str = "asymmetric"
+) -> tuple[pd.DataFrame, pd.Timestamp]:
+    """Calibrate conformal on the earlier origins and band the held-out latest origin. Returns the
+    banded test-origin frame (with ``lower``/``upper``/``width``) and the test origin."""
+    cal, test, test_origin = calibration_test_split(ff)
     banded = SplitConformal(alpha=alpha, mode=mode).fit(cal).apply(test)
-    return banded, pd.Timestamp(test_origin)
+    return banded, test_origin
+
+
+def calibration_quantile_grid(
+    cal: pd.DataFrame, quantiles: np.ndarray
+) -> pd.DataFrame:
+    """Per-horizon quantiles of the *scaled* calibration residuals — the conformal predictive
+    quantile function the decision layer (D2 newsvendor) reads. One row per (h, q) with ``offset``
+    = the q-quantile of ``resid/scale`` at horizon h; a predictive quantile for a test row is then
+    ``yhat + scale * offset``. Same scale-normalisation as the band, so a single grid serves every
+    series. Kept as a compact grid (not a live calibrator) so the dashboard never recomputes
+    conformal — it just indexes the nearest q."""
+    rows = []
+    for h, g in cal.groupby("h"):
+        z = (g["resid"] / g["scale"]).to_numpy()
+        for q in quantiles:
+            rows.append({"h": int(h), "q": float(q), "offset": float(np.quantile(z, q))})
+    return pd.DataFrame(rows)
 
 
 def evaluate_conformal(

@@ -28,7 +28,13 @@ import numpy as np
 import pandas as pd
 
 from src.forecast.backtest import BacktestConfig
-from src.forecast.intervals import calibrate_and_band, coverage_report, origin_forecasts
+from src.forecast.intervals import (
+    SplitConformal,
+    calibration_quantile_grid,
+    calibration_test_split,
+    coverage_report,
+    origin_forecasts,
+)
 from src.forecast.models import KNOWN_FUTURE, v2
 from src.query.slices import read_store_slice
 
@@ -37,21 +43,28 @@ FORECAST_DIR = _REPO / "data" / "processed" / "forecast"
 
 SAMPLE_SIZE = 200  # the fixed B1–B4 sample; keeps the persisted coverage == the reported coverage
 SAMPLE_SEED = 0
+# Predictive-quantile grid the D2 newsvendor reads (order to the q* = Cu/(Cu+Co) quantile).
+QUANTILE_GRID = np.round(np.arange(0.01, 1.0, 0.01), 2)
 
 
 @dataclass
 class ForecastArtifact:
-    """The persisted forecast for one store: the banded held-out-origin frame plus the header
-    metadata the dashboard renders above the panel."""
+    """The persisted forecast for one store: the banded held-out-origin frame, the per-horizon
+    predictive-quantile grid (for the D2 asymmetric-cost newsvendor), and the header metadata the
+    dashboard renders above the panel."""
 
     forecast: pd.DataFrame
     meta: dict
+    quantiles: pd.DataFrame | None = None
 
     def parquet_path(self) -> Path:
         return FORECAST_DIR / f"forecast_{self.meta['store']}.parquet"
 
     def meta_path(self) -> Path:
         return FORECAST_DIR / f"forecast_{self.meta['store']}.json"
+
+    def quantiles_path(self) -> Path:
+        return FORECAST_DIR / f"quantiles_{self.meta['store']}.parquet"
 
 
 def build_forecast_artifact(
@@ -76,7 +89,10 @@ def build_forecast_artifact(
 
     cfg = BacktestConfig(known_future=KNOWN_FUTURE, extra_params={"scope": f"{store}_sample200"})
     ff = origin_forecasts(df, v2(), cfg)
-    banded, test_origin = calibrate_and_band(ff, alpha=alpha, mode=mode)
+    # One split feeds both artifacts: cal → band + quantile grid, test → the held-out origin.
+    cal, test, test_origin = calibration_test_split(ff)
+    banded = SplitConformal(alpha=alpha, mode=mode).fit(cal).apply(test)
+    quantiles = calibration_quantile_grid(cal, QUANTILE_GRID)
     summary, _ = coverage_report(banded)
 
     # Attach the display keys (one static row per series) so the dashboard needn't re-join.
@@ -102,27 +118,34 @@ def build_forecast_artifact(
         "n_rows": int(len(forecast)),
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
     }
-    return ForecastArtifact(forecast=forecast, meta=meta)
+    return ForecastArtifact(forecast=forecast, meta=meta, quantiles=quantiles)
 
 
 def persist_forecast(artifact: ForecastArtifact) -> ForecastArtifact:
-    """Write the artifact's Parquet + JSON sidecar under data/processed/forecast/ (gitignored)."""
+    """Write the artifact's Parquet + JSON sidecar + quantile grid under data/processed/forecast/
+    (gitignored)."""
     FORECAST_DIR.mkdir(parents=True, exist_ok=True)
     artifact.forecast.to_parquet(artifact.parquet_path(), index=False)
     artifact.meta_path().write_text(json.dumps(artifact.meta, indent=2))
+    if artifact.quantiles is not None:
+        artifact.quantiles.to_parquet(artifact.quantiles_path(), index=False)
     return artifact
 
 
 def load_forecast(store: str = "CA_3") -> ForecastArtifact:
     """Read a persisted forecast artifact back (the dashboard's entry point)."""
     stub = ForecastArtifact(forecast=pd.DataFrame(), meta={"store": store})
-    pq, mj = stub.parquet_path(), stub.meta_path()
-    if not pq.exists() or not mj.exists():
+    pq, mj, qp = stub.parquet_path(), stub.meta_path(), stub.quantiles_path()
+    if not pq.exists() or not mj.exists() or not qp.exists():
         raise FileNotFoundError(
             f"No persisted forecast for {store} at {pq}. "
             "Build it first: uv run python -m src.forecast.persist"
         )
-    return ForecastArtifact(forecast=pd.read_parquet(pq), meta=json.loads(mj.read_text()))
+    return ForecastArtifact(
+        forecast=pd.read_parquet(pq),
+        meta=json.loads(mj.read_text()),
+        quantiles=pd.read_parquet(qp),
+    )
 
 
 def main() -> None:
@@ -135,6 +158,9 @@ def main() -> None:
     print(f"  test origin {m['test_origin']}  horizon {m['horizon']}d")
     print(f"  coverage {m['empirical_coverage']:.3f} (target {m['target_coverage']:.2f})  "
           f"mean width {m['mean_width']:.2f}")
+    print(f"  wrote {art.quantiles_path().relative_to(_REPO)}  "
+          f"({len(art.quantiles):,} rows = {art.quantiles['q'].nunique()} quantiles x "
+          f"{art.quantiles['h'].nunique()} horizons)")
 
 
 if __name__ == "__main__":

@@ -86,3 +86,86 @@ is persisted yet. The Streamlit app itself is glue over tested functions — the
 validated by building it and calling `.to_dict()` (Altair raises on a bad spec), and the full
 load→filter→chart path is exercised as a smoke check; there's no value in mocking the Streamlit
 runtime.
+
+---
+
+## D2 — Segment-level error panel + asymmetric-cost visual
+
+**What D2 is:** two panels that answer the two questions a planner asks *after* seeing the
+forecast. First, *where does the error actually land?* — because one headline WMAPE hides the
+items that matter. Second, *what is the interval worth?* — turning the band into an order quantity
+under an asymmetric cost. Both read the same persisted artifact; the dashboard stays a pure reader.
+
+### D2a — segment error rollups (see `src/query/segments.py`)
+
+The guardrail: *aggregate accuracy hides the spiky high-value items.* So we break the held-out
+origin's error down three ways — by **category**, **department**, and **volume tier** (quartiles of
+mean demand) — and, crucially, report each segment's **share of units** next to its error.
+
+**DuckDB owns the aggregation** (CLAUDE.md), reading the persisted forecast Parquet directly.
+Two metrics, each rolled up the way B1 defines it:
+
+- **WMAPE** — pooled `Σ|sales−yhat| / Σ|sales|` over the segment. Rolls up cleanly.
+- **RMSSE** — per-series then averaged. The trick: the interval `scale` we persisted is
+  `√(naive_scale)`, so per-series RMSSE reconstructs as `RMSE_series / scale` — no need to
+  re-read training history. The SQL computes it in an inner per-series query, then averages.
+
+The finding is the whole point of the panel. On CA_3's 200-series sample:
+
+| Volume tier | WMAPE | unit share |
+|---|---|---|
+| Q1 (low) | ~176% | 3% |
+| Q4 (high) | ~48% | 71% |
+
+The slow movers have wild percentage error but are a rounding error in volume; the fast items that
+dominate planning forecast *best*. A single blended WMAPE (~0.6) reports neither honestly. RMSSE
+stays flatter across tiers (~0.6–0.76) — a reminder the two metrics answer different questions.
+
+### D2b — the asymmetric-cost visual (see `src/forecast/decision.py`)
+
+This is where the interval stops being a picture and becomes a decision. The model is the classic
+**newsvendor**: with underage cost `Cu` (stockout) and overage cost `Co` (overstock), expected
+cost is minimised by ordering to the **critical-ratio quantile**:
+
+```
+q* = Cu / (Cu + Co)        # only the ratio matters for where to order
+order = yhat + scale · offset_h(q*)   # the q*-quantile from the conformal grid
+```
+
+So the order point *is* a quantile of the forecast — and B4's conformal machinery already produces
+calibrated, per-horizon, scale-normalised quantiles. Ordering to the point forecast (`yhat`, ≈ the
+median) is the newsvendor optimum **only when `Cu = Co`**; the moment stockouts cost more, `q* >
+0.5` and the optimal order sits in the *upper half of the band*.
+
+**The predictive-quantile grid.** To let the slider pick any `q*`, `persist.py` writes a second
+artifact — `quantiles_CA_3.parquet`, the per-horizon quantile function (99 quantiles × 28 horizons)
+of the scaled calibration residuals (`calibration_quantile_grid`). The dashboard indexes the
+nearest `q`; it never recomputes conformal. Per-horizon matters: later horizons need a bigger
+safety buffer, the same reason the band flares.
+
+**Realised, not assumed.** `policy_costs` evaluates two policies — order-to-`yhat` vs
+order-to-`q*` — against the held-out origin's *actual* sales, and reports total cost, **fill rate**
+(units met ÷ demanded), and mean order. On the sample, as `Cu:Co` climbs 1→9 the interval-aware
+policy lifts fill rate ~68%→92% and cuts realised cost up to ~40%. Even at `1:1` it saves a little
+by ordering to the median rather than the right-skew-inflated mean. Cost is normalised (`Co = 1`)
+because only the ratio drives the order; that's stated in the caption, not hidden.
+
+### Design decisions worth defending
+
+- **Grid, not a live calibrator.** We persist a static quantile table rather than shipping the
+  `SplitConformal` object into the app. Keeps the reader-pure principle and makes the slider a
+  lookup, not a model call.
+- **Store-level cost, per-series error.** The cost panel aggregates across all series (a store's
+  total ordering cost is the planning-relevant number); the segment panel disaggregates (that's
+  its entire job). Different altitudes on purpose.
+- **Two metrics, shown together.** WMAPE for volume-weighted % error, RMSSE for scale-free
+  per-series accuracy. Neither alone tells the segment story.
+
+### What's tested
+
+`tests/test_decision.py`: the critical ratio is the textbook formula, orders read the nearest grid
+quantile and scale correctly, orders rise with `q*`, are clipped ≥ 0, the realised-cost accounting
+charges each side right, and the policy comparison lifts fill rate as stockouts get costlier.
+`tests/test_segments.py`: WMAPE pools per segment, RMSSE uses the persisted scale, unit shares sum
+to one, and the volume tiers partition the series. `tests/test_persist.py` gains the quantile-grid
+schema + monotonicity checks and that `load_forecast` now requires the grid file.

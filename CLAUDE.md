@@ -82,8 +82,9 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # build store (A4)  — uv run python -m src.ingest.feature_store  (full pipeline -> Parquet, ~2-3 min)
 # read slice (A4)   — uv run python -m src.query.slices  (DuckDB slice-read demo)
 #   in code: from src.query.slices import read_store_slice; df = read_store_slice("CA_3")
-# build forecast (D1)— uv run python -m src.forecast.persist  (bands held-out origin -> Parquet+JSON)
-# launch dashboard  — uv run streamlit run src/dashboard/app.py  (D1; reads the persisted artifact)
+# build forecast (D1)— uv run python -m src.forecast.persist  (bands held-out origin + quantile grid)
+# segment rollup(D2)— uv run python -m src.query.segments  (DuckDB WMAPE/RMSSE by cat/dept/tier)
+# launch dashboard  — uv run streamlit run src/dashboard/app.py  (D1+D2; reads persisted artifact)
 
 # Env facts (A0): Python 3.11 (uv-managed), Java 17 (Homebrew, for the Spark JVM),
 #   PySpark 4.2, pandas pinned <3.0 (PySpark 4.2 interop). Verify Spark: it starts a
@@ -161,11 +162,12 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   forecast-vs-actual + conformal interval. DECISION: persist, don't compute (option 1) — the app
 #   is a PURE READER (imports no LightGBM/harness), so free hosting (D4) works and the shown
 #   coverage IS the backtest's. persist.py refits v2 across the 4 rolling origins, calibrates
-#   conformal (reuses intervals.calibrate_and_band, extracted from evaluate_conformal so evaluator
-#   + persister share one split), bands the HELD-OUT LATEST origin, writes two files to
-#   data/processed/forecast/ (gitignored): forecast_CA_3.parquet (5,600 rows = 200 series x 28d;
-#   sales/yhat/lower/upper/width/scale + dept/cat) + forecast_CA_3.json (model, mode, target vs
-#   EMPIRICAL coverage 0.912, mean width 5.10, origin 2016-04-24, n_series). Persists the SAME
+#   conformal (via intervals.calibration_test_split, shared with evaluate_conformal so the split is
+#   one code path), bands the HELD-OUT LATEST origin, writes three files to data/processed/forecast/
+#   (gitignored): forecast_CA_3.parquet (5,600 rows = 200 series x 28d; sales/yhat/lower/upper/
+#   width/scale + dept/cat) + forecast_CA_3.json (model, mode, target vs EMPIRICAL coverage 0.912,
+#   mean width 5.10, origin 2016-04-24, n_series) + quantiles_CA_3.parquet (D2 grid, below).
+#   Persists the SAME
 #   fixed 200-series sample (seed 0) as B1-B4 so the sidecar coverage == the documented B4 number
 #   (sample_size=None would forecast the whole store but then the coverage no longer matches).
 #   App: @st.cache_data over the Parquet read + a DuckDB read_store_slice for pre-origin context
@@ -175,6 +177,23 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   flagged as noisy (n=28) -> surfaces B4's marginal-vs-conditional caveat in the UI. Tests:
 #   test_persist.py (schema, sidecar==coverage_report, round-trip, missing-file error) via a df=
 #   seam on build_forecast_artifact (no feature store needed).
+# Dashboard D2 (src/query/segments.py + src/forecast/decision.py + app.py panels): two panels over
+#   the SAME persisted artifact (still a pure reader). D2a SEGMENT ERROR (segments.py, DuckDB owns
+#   the rollup): WMAPE (pooled) + RMSSE (per-series-then-mean, reconstructed as RMSE/scale since
+#   persisted scale = sqrt(naive_scale)) + UNIT SHARE, grouped by cat_id/dept_id/volume-tier
+#   (pd.qcut quartiles). THE finding = the guardrail: Q1 low-vol WMAPE ~176% but 3% of units vs Q4
+#   high-vol WMAPE ~48% & 71% of units -> a single blended WMAPE (~0.6) describes no real item.
+#   D2b ASYMMETRIC COST (decision.py = NEWSVENDOR): critical ratio q*=Cu/(Cu+Co); order = yhat +
+#   scale*offset_h(q*) read from the persisted per-horizon QUANTILE GRID (quantiles_CA_3.parquet,
+#   99 q x 28 h, from intervals.calibration_quantile_grid on the cal residuals). Order to yhat is
+#   optimal ONLY at Cu=Co (q*=0.5); stockouts costlier -> q*>0.5 -> order into the upper half of the
+#   band. policy_costs evaluates point vs newsvendor on the held-out ACTUALS: as Cu:Co 1->9 fill
+#   rate ~68%->92%, realised cost saved up to ~40% (even 1:1 saves ~2% by ordering to the median
+#   not the right-skew-inflated mean). Cost is NORMALISED (Co=1; only the ratio drives the order) ->
+#   caption says so, never $. Grid not a live calibrator (reader-pure); per-horizon because
+#   recursive error compounds. Tests: test_decision.py (critical ratio, grid lookup+scale, orders
+#   rise w/ q*, clipped>=0, cost accounting, fill rises w/ Cu:Co) + test_segments.py (WMAPE pool,
+#   RMSSE via scale, unit_share sums to 1, tiers partition) + test_persist.py grid schema/monotone.
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
