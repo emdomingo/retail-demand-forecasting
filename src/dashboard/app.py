@@ -24,9 +24,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import altair as alt  # noqa: E402
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from src.causal.persist import load_causal  # noqa: E402
 from src.forecast.decision import critical_ratio, policy_costs  # noqa: E402
 from src.forecast.persist import load_forecast  # noqa: E402
 from src.query.segments import segment_error, volume_tier_error  # noqa: E402
@@ -41,6 +43,12 @@ def _load_artifact(store: str):
     """Persisted banded forecast + quantile grid + metadata for one store (cached across reruns)."""
     art = load_forecast(store)
     return art.forecast, art.quantiles, art.meta
+
+
+@st.cache_data(show_spinner=False)
+def _load_causal():
+    """Persisted causal results (C2/C2b DiD + C3 SNAP), cached across reruns."""
+    return load_causal()
 
 
 @st.cache_data(show_spinner=False)
@@ -163,6 +171,7 @@ def main() -> None:
 
     _segment_panel(fc_all)
     _cost_panel(fc_all, quantiles)
+    _causal_panel()
 
 
 def _segment_panel(fc_all: pd.DataFrame) -> None:
@@ -281,6 +290,174 @@ def _cost_chart(costs: pd.DataFrame) -> alt.Chart:
         )
         .properties(height=260)
     )
+
+
+def _causal_panel() -> None:
+    """D3 — the causal layer: *why* demand moved. When actuals diverge from the forecast, the
+    planner's real question is the cause; this surfaces the two estimated interventions — the price
+    cut (C2 DiD + C2b five-store replication) and SNAP (C3 cross-state counterfactual) — each as an
+    effect with its confidence interval and its falsification evidence. Reads the persisted causal
+    JSON; the app runs no statsmodels."""
+    st.divider()
+    st.subheader("Why demand moved — intervention effects")
+    try:
+        causal = _load_causal()
+    except FileNotFoundError as e:
+        st.info(str(e))
+        return
+
+    pc_tab, snap_tab = st.tabs(["💲 Price cut (DiD)", "🍎 SNAP benefits"])
+    with pc_tab:
+        _price_cut_tab(causal["price_cut"])
+    with snap_tab:
+        _snap_tab(causal["snap"])
+
+
+def _price_cut_tab(pc: dict) -> None:
+    st.markdown(
+        f"**{pc['treated']} @ {pc['store']}** — price cut {pc['price']} on {pc['cut']}. "
+        "How much of the post-cut jump did the cut *cause*?"
+    )
+    a, b, c = st.columns(3)
+    lo, hi = pc["ci"]["low"], pc["ci"]["high"]
+    a.metric("DiD demand lift", f"{pc['lift']:+.1%}", f"95% CI [{lo:+.0%}, {hi:+.0%}]",
+             delta_color="off")
+    b.metric("Disciplined down from", f"{pc['naive_lift']:+.1%}",
+             "naive pre/post jump", delta_color="off")
+    c.metric("Implied elasticity", f"{pc['elasticity']:.1f}", "≈ Δlift / Δprice", delta_color="off")
+
+    st.altair_chart(_event_study_chart(pc["event_study"]), width="stretch")
+    st.caption(
+        "Event study: demand gap vs matched controls, by week relative to the cut (vs the week "
+        "before). **Leads flat around zero = parallel pre-trends** — the DiD identifying "
+        "assumption, shown not asserted. The jump at week 0 and after is the effect."
+    )
+    placebo = pc["placebo"]
+    verdict = "✅ passes" if placebo["covers_zero"] else "⚠️ fails"
+    st.caption(
+        f"Placebo (fake cut in the pre-period): {placebo['lift']:+.1%} — CI covers zero, "
+        f"so no spurious pre-cut divergence ({verdict})."
+    )
+
+    st.markdown("**Chain-wide replication (C2b)** — the same cut in five stores neutralises the "
+                "thin single-store pre-period. Five agreeing estimates beat one.")
+    rep = pc["replication"]
+    st.altair_chart(_forest_chart(rep), width="stretch")
+    rlo, rhi = rep["pooled_re"]["ci"]["low"], rep["pooled_re"]["ci"]["high"]
+    st.caption(
+        f"{rep['n_positive']}/{rep['k']} positive, {rep['n_sig']}/{rep['k']} significant. "
+        f"Heterogeneity I² = {rep['i_squared']:.0%} (Q p = {rep['q_pvalue']:.2f}), so quote the "
+        f"**random-effects** pool: **{rep['pooled_re']['lift']:+.1%}** [{rlo:+.0%}, {rhi:+.0%}] — "
+        "wider than the fixed-effect CI, honestly reflecting the between-store spread."
+    )
+
+
+def _snap_tab(sn: dict) -> None:
+    st.markdown(
+        f"**{sn['category']} demand @ {sn['store']} ({sn['state']})** — the average lift on a SNAP "
+        "benefit day. SNAP has no clean pre-period and is store-wide, so DiD can't be used; the "
+        "counterfactual is **cross-state** (TX/WI stores are on different SNAP schedules)."
+    )
+    main = sn["main"]
+    lo, hi = main["ci"]["low"], main["ci"]["high"]
+    naive = sn["ladder"][0]
+    a, b = st.columns(2)
+    a.metric("SNAP-day lift (cross-state)", f"{main['lift']:+.1%}",
+             f"95% CI [{lo:+.1%}, {hi:+.1%}]", delta_color="off")
+    b.metric("Disciplined down from", f"{naive['lift']:+.1%}",
+             "naive (no controls)", delta_color="off")
+
+    st.altair_chart(_ladder_chart(sn["ladder"]), width="stretch")
+    st.caption(
+        "The estimate ladder: as the counterfactual improves (naive → +calendar → +cross-state "
+        "controls), the lift disciplines down and the fit R² climbs — the same lesson as the price "
+        "cut. The cross-state estimate is the one to quote."
+    )
+    p_ok = all(p["covers_zero"] for p in sn["placebos"])
+    clean = sn["clean_day"]
+    st.caption(
+        f"Falsification: both cross-state placebos {'✅ cover zero' if p_ok else '⚠️ do not'} "
+        f"(CA's schedule is not a fake treatment on TX/WI). Clean-day estimator (CA-only SNAP days "
+        f"vs no-SNAP days) corroborates at {clean['lift']:+.1%}."
+    )
+
+
+def _pct_frame(records: list[dict]) -> pd.DataFrame:
+    """Convert log-point coef/CI records to % lift (exp−1) for display."""
+    df = pd.DataFrame(records)
+    for src, dst in [("coef", "lift"), ("ci_low", "lo"), ("ci_high", "hi")]:
+        df[dst] = np.expm1(df[src])
+    return df
+
+
+def _event_study_chart(records: list[dict]) -> alt.Chart:
+    df = _pct_frame(records)
+    base = alt.Chart(df)
+    err = base.mark_rule(color="#4c78a8").encode(
+        x=alt.X("rel_week:Q", title="weeks relative to cut"),
+        y=alt.Y("lo:Q", title="demand gap vs control", axis=alt.Axis(format="%")),
+        y2="hi:Q",
+    )
+    pts = base.mark_point(color="#4c78a8", filled=True, size=45).encode(
+        x="rel_week:Q", y="lift:Q",
+        tooltip=[alt.Tooltip("rel_week:Q", title="rel week"),
+                 alt.Tooltip("lift:Q", title="gap", format="+.1%")],
+    )
+    zero = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#999").encode(y="y:Q")
+    cut = alt.Chart(pd.DataFrame({"x": [-0.5]})).mark_rule(
+        color="#c44", strokeDash=[4, 3]).encode(x="x:Q")
+    return (zero + cut + err + pts).properties(height=300)
+
+
+def _forest_chart(rep: dict) -> alt.Chart:
+    rows = [
+        {"label": f"{s['store']} (cut {s['cut']})", "lift": s["lift"],
+         "lo": s["ci"]["low"], "hi": s["ci"]["high"], "kind": "store"}
+        for s in rep["stores"]
+    ]
+    rows.append({
+        "label": "Pooled (random-effects)", "lift": rep["pooled_re"]["lift"],
+        "lo": rep["pooled_re"]["ci"]["low"], "hi": rep["pooled_re"]["ci"]["high"],
+        "kind": "pooled",
+    })
+    df = pd.DataFrame(rows)
+    order = df["label"].tolist()
+    color = alt.Color("kind:N", scale=alt.Scale(
+        domain=["store", "pooled"], range=["#4c78a8", "#c44"]), legend=None)
+    base = alt.Chart(df)
+    err = base.mark_rule().encode(
+        y=alt.Y("label:N", sort=order, title=None),
+        x=alt.X("lo:Q", title="price-cut demand lift", axis=alt.Axis(format="%")),
+        x2="hi:Q", color=color,
+    )
+    pts = base.mark_point(filled=True, size=90).encode(
+        y=alt.Y("label:N", sort=order), x="lift:Q", color=color,
+        tooltip=[alt.Tooltip("label:N"), alt.Tooltip("lift:Q", format="+.1%")],
+    )
+    zero = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color="#999").encode(x="x:Q")
+    return (zero + err + pts).properties(height=alt.Step(34))
+
+
+def _ladder_chart(ladder: list[dict]) -> alt.Chart:
+    df = pd.DataFrame(
+        [{"label": r["label"], "lift": r["lift"], "lo": r["ci"]["low"],
+          "hi": r["ci"]["high"], "r2": r["r_squared"]} for r in ladder]
+    )
+    order = df["label"].tolist()  # naive -> calendar -> cross_state
+    is_main = alt.condition(
+        alt.datum.label == "cross_state", alt.value("#c44"), alt.value("#4c78a8"))
+    base = alt.Chart(df)
+    err = base.mark_rule().encode(
+        y=alt.Y("label:N", sort=order, title=None),
+        x=alt.X("lo:Q", title="SNAP-day lift", axis=alt.Axis(format="%")), x2="hi:Q", color=is_main,
+    )
+    pts = base.mark_point(filled=True, size=90).encode(
+        y=alt.Y("label:N", sort=order), x="lift:Q", color=is_main,
+        tooltip=[alt.Tooltip("label:N"), alt.Tooltip("lift:Q", format="+.1%"),
+                 alt.Tooltip("r2:Q", title="R²", format=".2f")],
+    )
+    zero = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color="#999").encode(x="x:Q")
+    return (zero + err + pts).properties(height=alt.Step(40))
 
 
 if __name__ == "__main__":

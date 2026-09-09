@@ -169,3 +169,64 @@ charges each side right, and the policy comparison lifts fill rate as stockouts 
 `tests/test_segments.py`: WMAPE pools per segment, RMSSE uses the persisted scale, unit shares sum
 to one, and the volume tiers partition the series. `tests/test_persist.py` gains the quantile-grid
 schema + monotonicity checks and that `load_forecast` now requires the grid file.
+
+---
+
+## D3 — Intervention-effect panel (the causal layer, surfaced)
+
+**What D3 is:** the dashboard's answer to *why did demand move?* When actuals diverge from the
+forecast, the planner's real question is the cause — and Feature C already estimated two: the price
+cut (C2 DiD + C2b five-store replication) and SNAP (C3 cross-state counterfactual). D3 surfaces
+each as an **effect with its confidence interval** plus the falsification evidence that makes it
+credible. It is the on-ramp from the forecast half to the causal half.
+
+### Persist-then-read, again (see `src/causal/persist.py`)
+
+The causal estimators need `statsmodels` and several DuckDB passes over the feature store — none of
+which belong in the Streamlit runtime. So the same pattern as D1/D2: `causal/persist.py` runs
+C2/C2b/C3 once, offline (~1 min), and lands a single small JSON, `data/processed/causal/causal.json`
+(gitignored). The app imports no `statsmodels` and refits nothing; it reads fields.
+
+The artifact is assembled straight from the existing causal functions — `did.estimate_did`,
+`did.event_study`, `did.placebo_test`, `replication.replicate` + `pool`, `snap.estimate_ladder`,
+`snap.placebo`, `snap.clean_day_estimate` — so the numbers on screen are exactly the module
+outputs, not a reimplementation. Two small derived fields: the **naive jump** (`_naive_jump`, the
+treated item's raw pre/post ratio, the uncontrolled number DiD disciplines *down* from) and the
+**elasticity** (lift ÷ the −16.8% price change).
+
+### The two tabs
+
+**Price cut (DiD).** Three cards — the DiD lift +42.1% [+12.5%, +79.4%], the naive +55.9% it was
+disciplined down from (the gap is the method's value), and the implied elasticity ≈ −2.5. Then the
+**event-study chart**: the treated-vs-control demand gap by week relative to the cut. The story is
+in the shape — *leads flat around zero* is the parallel-trends assumption shown, not asserted; the
+jump at week 0 is the effect. Below it, the **replication forest**: each of the five chain-wide cuts
+with its CI, plus the pooled diamond. The caption quotes the **random-effects** pool +56.9%
+[+34.6%, +82.9%] (not the too-narrow fixed-effect CI) because I² ≈ 57% says the stores genuinely
+differ — the honest number to report.
+
+**SNAP.** Two cards — the cross-state lift +10.7% [+9.1%, +12.3%] and the naive +16.8% it improves
+on. Then the **estimate ladder** (naive → +calendar → +cross-state): the lift disciplines down and
+R² climbs as the counterfactual improves, the same lesson as the price cut, with the cross-state bar
+highlighted as the one to quote. The caption carries the falsification: both cross-state placebos
+cover zero, and the clean-day estimator corroborates.
+
+### Design choices
+
+- **Log points → % for display.** Event-study and forest coefficients are in log points; the panel
+  converts each to a % lift (`exp−1`) so a planner reads "demand gap," not "log-units." Shape and
+  ordering are preserved.
+- **Rebuilt in Altair, not the committed PNGs.** Feature C saved static matplotlib figures for the
+  docs; the dashboard rebuilds the event study, forest, and ladder as interactive Altair from the
+  persisted numbers — consistent with D1/D2, hover-able, and theme-aware.
+- **Falsifications shown, not hidden.** The placebo (price cut) and the two SNAP placebos + clean-day
+  check are surfaced in captions. The credibility *is* the deliverable here, not just the point
+  estimate — same spirit as "the interval is the deliverable" on the forecast side.
+
+### What's tested
+
+`tests/test_causal_persist.py`: the persist→load round-trip, the loud FileNotFoundError when
+nothing is built, and the pure assembly helpers (`_naive_jump` = the uncontrolled treated ratio,
+`_snap_row` reads effect + covers-zero). The estimators themselves are already covered by
+`test_did.py`, `test_replication.py`, and `test_snap.py`, so D3's tests stay on the new plumbing
+rather than re-estimating (a ~1-min refit) in the suite.

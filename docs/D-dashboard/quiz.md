@@ -161,3 +161,76 @@ Append-only across D1–D4. Self-quiz: recall, predict-the-decision, spot-the-fl
 13. `policy_costs` sets `Co = 1` and `Cu =` the ratio, so cost is in **normalised units**, not
     currency — only the *ratio* affects the order, and the absolute scale is arbitrary. Printing it
     as dollars claims a precision the model doesn't have; the caption says "normalised units."
+
+---
+
+## D3 — Intervention-effect panel (the causal layer, surfaced)
+
+**Recall**
+1. Which two interventions does D3 show, and what estimator does each use?
+2. What single file does D3 read, and why doesn't the app import `statsmodels`?
+3. In the event-study chart, what does "leads flat around zero" demonstrate?
+4. Which pooled estimate does the replication caption quote — fixed- or random-effects — and why?
+
+**Predict-the-decision**
+5. The price-cut card shows both the DiD lift (+42%) and the naive jump (+56%). Why show the naive
+   number at all instead of just the headline?
+6. SNAP is shown with a cross-state counterfactual, not a DiD. What two properties of SNAP rule DiD
+   out?
+7. Event-study and forest coefficients are stored in log points but displayed as %. Why convert,
+   and what is preserved?
+8. D3 rebuilds the event study / forest / ladder in Altair even though Feature C already saved PNGs
+   of them. What does rebuilding buy?
+
+**Spot-the-flaw**
+9. A reviewer says "the dashboard should recompute the DiD live so it's always current." Why is
+   that the wrong call here (give two reasons)?
+10. Someone reads the SNAP ladder and reports the naive +16.8% as the SNAP effect. What did they
+    miss, and which bar should they quote?
+11. A teammate quotes the fixed-effect replication pool because its CI is tighter. Why is that the
+    less honest choice given I² ≈ 57%?
+12. The elasticity card shows −2.5. A colleague computes it as `lift / price` = 0.42 / 2.98. What's
+    wrong with that, and what is the right denominator?
+
+---
+
+### Answers — D3
+
+1. The **price cut** — C2 Difference-in-Differences (TWFE on log-units, clustered by item) plus the
+   C2b five-store replication with a meta-analytic pool — and **SNAP** — the C3 cross-state OLS
+   counterfactual (HAC/Newey-West SEs).
+2. `data/processed/causal/causal.json`, written offline by `src/causal/persist.py`. The estimators
+   need `statsmodels` + DuckDB passes that don't belong in the Streamlit runtime, so — same as
+   D1/D2 — the app is a pure reader and imports no modelling code.
+3. That the treated and control series moved *together before* the cut — the **parallel-trends**
+   identifying assumption of DiD, shown rather than asserted. A pre-trend would invalidate the
+   causal reading.
+4. **Random-effects.** I² ≈ 57% (with Q's p ≈ 0.06) says the stores estimate genuinely different
+   effects, so the fixed-effect CI (which assumes one shared effect) is too narrow; the
+   random-effects pool +56.9% [+34.6%, +82.9%] widens it to reflect the between-store spread.
+5. Because the gap *is* the method's value: the raw pre/post jump (+56%) overstates the cut's effect
+   by a third because it ignores what controls were doing over the same weeks. Showing both makes
+   the discipline visible — the DiD isn't a smaller number pulled from nowhere, it's the naive
+   number corrected for the counterfactual.
+6. SNAP is a **recurring monthly pulse with no clean pre-period** (it's present across the whole
+   window) and it's **store-wide** (every item in the store is "treated," so there's no within-store
+   control group). DiD needs both a pre-period and untreated units; SNAP has neither — hence
+   cross-state controls (states on different SNAP schedules).
+7. A planner reads "demand gap," not "log-units gap"; `exp(coef)−1` turns each coefficient into a %
+   lift. The **shape and ordering** (flat leads, the jump at 0, relative magnitudes) are preserved —
+   the conversion is monotonic.
+8. Interactivity and consistency: the Altair versions are hover-able, theme-aware, and match the
+   D1/D2 chart style, all rebuilt from the same persisted numbers. The PNGs are for the docs; the
+   dashboard shouldn't ship static images where it renders everything else live.
+9. (a) It would drag `statsmodels` + the feature-store passes into the deployed app, breaking the
+   pure-reader / free-hosting story; (b) the estimates are over a **frozen historical dataset** —
+   nothing to be "current" about — so live recompute adds cost and risk for zero freshness.
+10. They quoted the **uncontrolled** estimate — naive OLS with no counterfactual, which conflates
+    SNAP with the early-month calendar wave and cross-state demand. The **cross-state** bar (+10.7%)
+    is the one to quote; the ladder exists precisely to show that discipline.
+11. With real between-store heterogeneity (I² ≈ 57%), the fixed-effect model's assumption of a
+    single shared effect is false, so its narrow CI understates the true uncertainty. Picking it
+    *because* it's tighter is choosing the more confident-looking number over the more honest one.
+12. `lift / price` mixes a percentage with a dollar level. Elasticity is `%Δquantity / %Δprice`, so
+    the denominator is the **percentage** price change (−16.8%), not the $2.98 level: 0.421 /
+    (−0.168) ≈ −2.5.

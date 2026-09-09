@@ -84,7 +84,8 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   in code: from src.query.slices import read_store_slice; df = read_store_slice("CA_3")
 # build forecast (D1)— uv run python -m src.forecast.persist  (bands held-out origin + quantile grid)
 # segment rollup(D2)— uv run python -m src.query.segments  (DuckDB WMAPE/RMSSE by cat/dept/tier)
-# launch dashboard  — uv run streamlit run src/dashboard/app.py  (D1+D2; reads persisted artifact)
+# build causal (D3)— uv run python -m src.causal.persist  (runs C2+C2b+C3 -> causal.json, ~1min)
+# launch dashboard  — uv run streamlit run src/dashboard/app.py  (D1-D3; reads persisted artifacts)
 
 # Env facts (A0): Python 3.11 (uv-managed), Java 17 (Homebrew, for the Spark JVM),
 #   PySpark 4.2, pandas pinned <3.0 (PySpark 4.2 interop). Verify Spark: it starts a
@@ -194,6 +195,20 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   recursive error compounds. Tests: test_decision.py (critical ratio, grid lookup+scale, orders
 #   rise w/ q*, clipped>=0, cost accounting, fill rises w/ Cu:Co) + test_segments.py (WMAPE pool,
 #   RMSSE via scale, unit_share sums to 1, tiers partition) + test_persist.py grid schema/monotone.
+# Dashboard D3 (src/causal/persist.py + app.py _causal_panel): the causal layer surfaced — WHY
+#   demand moved. Same persist-then-read: causal/persist.py runs C2 (did) + C2b (replication) + C3
+#   (snap) ONCE offline (~1min) -> data/processed/causal/causal.json (gitignored); app imports NO
+#   statsmodels. Numbers are the module outputs verbatim (did.estimate_did/event_study/placebo_test,
+#   replication.replicate+pool, snap.estimate_ladder/placebo/clean_day) + 2 derived: _naive_jump
+#   (treated raw pre/post ratio = the uncontrolled number DiD disciplines down from) & elasticity
+#   (lift / -0.168 price change). Panel = 2 st.tabs. PRICE CUT tab: cards DiD +42.1% [+12.5,+79.4]
+#   / naive +55.9% / elasticity -2.5; Altair event-study (leads flat=parallel trends), placebo
+#   covers 0; replication forest (5 stores + pooled), caption quotes RANDOM-effects +56.9%
+#   [+34.6,+82.9] (NOT fixed, I^2~57%). SNAP tab: cards cross-state +10.7% [+9.1,+12.3] / naive
+#   +16.8%; Altair ladder (naive->calendar->cross_state, cross_state highlighted); placebos cover
+#   0 + clean-day corroborates. Charts REBUILT in Altair (not the committed C-figures PNGs) from
+#   the JSON, log points -> % (expm1) for display. Tests: test_causal_persist.py (round-trip,
+#   missing-file error, _naive_jump, _snap_row) — estimators covered by test_did/replication/snap.
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)
