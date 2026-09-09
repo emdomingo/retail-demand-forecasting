@@ -1,0 +1,14 @@
+{
+  "store": "CA_3",
+  "model": "lightgbm_global_v2",
+  "mode": "asymmetric",
+  "alpha": 0.1,
+  "target_coverage": 0.9,
+  "empirical_coverage": 0.9121428571428571,
+  "mean_width": 5.1029010735699245,
+  "test_origin": "2016-04-24",
+  "horizon": 28,
+  "n_series": 200,
+  "n_rows": 5600,
+  "generated_at": "2026-09-09T01:15:25+00:00"
+}

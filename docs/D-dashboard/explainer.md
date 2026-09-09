@@ -230,3 +230,77 @@ nothing is built, and the pure assembly helpers (`_naive_jump` = the uncontrolle
 `_snap_row` reads effect + covers-zero). The estimators themselves are already covered by
 `test_did.py`, `test_replication.py`, and `test_snap.py`, so D3's tests stay on the new plumbing
 rather than re-estimating (a ~1-min refit) in the suite.
+
+---
+
+## D4 — Deploy to free hosting
+
+**What D4 is:** making the dashboard a real, public, $0-hosted link — and the work that
+*actually* required, which was more than "click deploy." Streamlit Community Cloud clones the
+GitHub repo and runs the app; that exposed two things the earlier subfeatures had glossed.
+
+### The two problems D4 had to fix
+
+1. **The app wasn't a pure reader — it just looked like one.** D1–D3 said "the app imports no
+   LightGBM/statsmodels." In truth, importing `forecast.persist` / `causal.persist` pulled in
+   **pyspark, lightgbm, mlflow, and statsmodels** transitively (through their module-top imports of
+   the models, the harness, and the causal estimators). On a $0 host that means installing Spark
+   (which needs Java), LightGBM, etc. — slow, heavy, and pointless for a reader.
+
+   **Fix:** the heavy, build-only imports moved *inside* the build functions (lazy import). Now
+   importing the module for `load_forecast` / `load_causal` pulls in nothing but pandas/duckdb.
+   A subprocess guard test (`test_dashboard_imports.py`) asserts importing the app loads none of
+   the four heavy modules — so the claim is enforced, not just asserted.
+
+2. **The app read the gitignored feature store live.** The D1 context line (the 56 days of actuals
+   before the origin) came from `read_store_slice`, i.e. the 59M-row feature store — which is
+   gitignored and *absent on the host*. The chart would have had no history to draw.
+
+   **Fix:** `persist.py` now bundles the pre-origin context (`context_<store>.parquet`, the last
+   `CONTEXT_DAYS` of actuals per series) into the artifact, and the app reads that. No feature
+   store, no DuckDB slice at request time.
+
+### The committed bundle (the decision)
+
+The deploy needs data, and the host can't rebuild it (no Kaggle pull, no Spark, no modelling deps).
+So the artifacts are **committed** — in a top-level `dashboard_data/` directory, deliberately
+*separate* from the gitignored `data/`. Five files, **~250 KB total**: the forecast, the quantile
+grid, the context, the forecast meta, and the causal JSON.
+
+This bends the letter of "never commit data," so it's worth stating the distinction precisely:
+`data/` holds the **dataset** — the 350 MB of raw M5 CSVs and the 59M-row feature store, both
+large and reproducible from Kaggle, correctly gitignored. `dashboard_data/` holds **model output**
+— tiny, derived, and the deliverable's display inputs. You cannot reconstruct the dataset from it,
+and the pipeline is still fully reproducible; committing it is the standard "ship the predictions,
+not the training data" pattern. (This supersedes the D1 framing, which described the pre-D4 state
+where the artifacts were gitignored and rebuilt locally.)
+
+Alternatives weighed and rejected for ~250 KB: a GitHub Release asset fetched at startup (repo
+stays literally data-free, but adds a download step and a release chore), and an external bucket +
+secret (most production-like, but a third-party service and a credential to maintain). For this
+size, committing is the simplest honest option.
+
+### The host dependency set (`requirements.txt`)
+
+The deployed app declares a **minimal** dependency set — `streamlit, altair, pandas, numpy,
+duckdb, pyarrow` — not the full `pyproject.toml` modelling env. The pure-reader refactor is what
+makes that possible: nothing the app imports needs Spark/LightGBM/statsmodels. Smaller install,
+faster cold start, no Java on the host. Local dev still uses `uv`; `requirements.txt` is for the
+host only.
+
+### Deploying (the manual step)
+
+The final click is the repo owner's — it needs their GitHub + Streamlit Community Cloud account,
+so it can't be automated from here. The app is **deploy-ready**; the steps are:
+
+1. Push `main` (with `dashboard_data/`, `requirements.txt`, `.streamlit/config.toml`) to GitHub.
+2. On share.streamlit.io → *New app* → pick the repo, branch `main`, main file
+   `src/dashboard/app.py`.
+3. Deploy. Community Cloud installs `requirements.txt` and runs the app; it reads `dashboard_data/`
+   straight from the clone. The public URL then goes in the E1 README.
+
+### What's tested
+
+`test_dashboard_imports.py` (the pure-reader guard, in a clean subprocess) + `test_persist.py`
+gains the context-tail schema check and that `load_forecast` now requires *every* bundle file. The
+render itself is still exercised end-to-end by the Streamlit `AppTest` smoke check.

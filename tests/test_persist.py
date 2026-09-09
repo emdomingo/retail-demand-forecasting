@@ -93,25 +93,38 @@ def test_quantile_grid_is_built_and_monotone():
         assert (np.diff(offs) >= -1e-9).all()  # non-decreasing in q
 
 
+def test_context_is_the_pre_origin_tail():
+    # The bundled context (for the chart's history line) must be actuals up to the origin, so the
+    # deployed app needs no feature store. One id/date/sales row per series-day, none after origin.
+    art = _artifact()
+    ctx = art.context
+    assert set(ctx.columns) == {"id", "date", "sales"}
+    origin = pd.Timestamp(art.meta["test_origin"])
+    assert (ctx["date"] <= origin).all()
+    assert set(ctx["id"].unique()) == set(art.forecast["id"].unique())
+
+
 def test_persist_load_roundtrips(_tmp_forecast_dir):
     art = _artifact()
     persist_forecast(art)
-    assert art.parquet_path().exists() and art.meta_path().exists()
-    assert art.quantiles_path().exists()
+    assert all(p.exists() for p in (
+        art.parquet_path(), art.meta_path(), art.quantiles_path(), art.context_path()))
 
     loaded = load_forecast("TEST")
     pd.testing.assert_frame_equal(loaded.forecast, art.forecast)
     pd.testing.assert_frame_equal(loaded.quantiles, art.quantiles)
+    pd.testing.assert_frame_equal(loaded.context, art.context)
     assert loaded.meta == art.meta
 
 
-def test_load_requires_the_quantile_grid(_tmp_forecast_dir):
-    # A forecast without its quantile grid is incomplete for D2 -> fail loudly, not silently.
+def test_load_requires_every_bundle_file(_tmp_forecast_dir):
+    # Any missing file leaves the dashboard incomplete -> fail loudly, not silently, per file.
     art = _artifact()
-    persist_forecast(art)
-    art.quantiles_path().unlink()
-    with pytest.raises(FileNotFoundError, match="Build it first"):
-        load_forecast("TEST")
+    for drop in (art.quantiles_path, art.context_path):
+        persist_forecast(art)
+        drop().unlink()
+        with pytest.raises(FileNotFoundError, match="Build it first"):
+            load_forecast("TEST")
 
 
 def test_load_missing_artifact_raises_with_guidance():

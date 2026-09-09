@@ -234,3 +234,63 @@ Append-only across D1–D4. Self-quiz: recall, predict-the-decision, spot-the-fl
 12. `lift / price` mixes a percentage with a dollar level. Elasticity is `%Δquantity / %Δprice`, so
     the denominator is the **percentage** price change (−16.8%), not the $2.98 level: 0.421 /
     (−0.168) ≈ −2.5.
+
+---
+
+## D4 — Deploy to free hosting
+
+**Recall**
+1. Where do the deployed app's data files live, and how big is the bundle?
+2. What minimal dependency set does the host install, and why not the full `pyproject.toml`?
+3. What two latent problems did D4 have to fix before the app could deploy?
+
+**Predict-the-decision**
+4. Why commit the artifacts (option A) rather than fetch them from a GitHub Release or an external
+   bucket, given "never commit data"?
+5. The heavy imports moved *inside* the build functions. What property does that give the app, and
+   how is it enforced rather than just claimed?
+6. Why bundle the pre-origin context into the artifact instead of reading it live like D1 did?
+
+**Spot-the-flaw**
+7. A teammate points at the D1 quiz answer ("the parquet is gitignored; rebuild it") and says the
+   committed `dashboard_data/` violates the project's rules. How do you answer?
+8. Someone deploys and the app installs pyspark + lightgbm + statsmodels on the host "to be safe."
+   What's wrong with that, and what makes it unnecessary?
+9. A reviewer says "just point the host at the feature store so the context line is always fresh."
+   Why can't the host do that?
+
+---
+
+### Answers — D4
+
+1. In a committed top-level `dashboard_data/` directory (separate from the gitignored `data/`) —
+   five files (forecast, quantile grid, context, forecast meta, causal JSON), ~250 KB total.
+2. `streamlit, altair, pandas, numpy, duckdb, pyarrow` via `requirements.txt`. The full env has
+   pyspark (needs Java), lightgbm, mlflow, statsmodels — all build-time only; installing them on
+   the host is slow, heavy, and needless because the app imports none of them.
+3. (a) The app wasn't actually a pure reader — importing the persist modules pulled in pyspark/
+   lightgbm/mlflow/statsmodels transitively; (b) the context line read the gitignored feature
+   store live, which is absent on the host.
+4. For ~250 KB of tiny derived output, a Release-asset download or an external bucket + secret is
+   over-engineering — extra steps, a service, a credential. Committing is simplest and still
+   honest: it's **model output**, not the dataset (you can't rebuild M5 from it), so it doesn't
+   violate the *spirit* of "never commit data" — that rule is about the 350 MB of raw CSVs and the
+   59M-row feature store, which stay gitignored.
+5. It makes the app a genuine **pure reader** — importing it pulls in no modelling deps, so it runs
+   on a minimal host. Enforced by `test_dashboard_imports.py`, which imports the app in a clean
+   subprocess and asserts none of pyspark/lightgbm/mlflow/statsmodels ended up in `sys.modules`.
+6. Because the feature store is gitignored and **absent on the host** — a live read would have no
+   history to draw. Bundling the last `CONTEXT_DAYS` of actuals per series makes the app
+   self-contained: it reads only `dashboard_data/`, no feature store, no request-time DuckDB slice.
+7. That answer described the **pre-D4** state and still holds for the *dataset*. D4 deliberately
+   introduced a separate, tiny, committed **presentation bundle** (`dashboard_data/`, ~250 KB of
+   model output) so the read-only app can deploy at $0. The dataset (`data/`) is still gitignored
+   and reproducible from Kaggle; nothing about that changed. It's "ship the predictions, not the
+   training data."
+8. It installs a heavy, Java-dependent stack (pyspark) the app never uses — slow cold starts,
+   wasted resources, possible build-limit failures. Unnecessary because the pure-reader refactor
+   means nothing the app imports touches Spark/LightGBM/statsmodels; the minimal `requirements.txt`
+   is sufficient and correct.
+9. The feature store is the gitignored 59M-row Parquet built by the Spark pipeline; it isn't in the
+   repo the host clones, and the host has neither the raw M5 data, a Kaggle token, nor Spark/Java to
+   rebuild it. The context therefore has to travel *with* the app, in the committed bundle.

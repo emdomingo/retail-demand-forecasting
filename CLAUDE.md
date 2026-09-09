@@ -85,7 +85,10 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 # build forecast (D1)— uv run python -m src.forecast.persist  (bands held-out origin + quantile grid)
 # segment rollup(D2)— uv run python -m src.query.segments  (DuckDB WMAPE/RMSSE by cat/dept/tier)
 # build causal (D3)— uv run python -m src.causal.persist  (runs C2+C2b+C3 -> causal.json, ~1min)
-# launch dashboard  — uv run streamlit run src/dashboard/app.py  (D1-D3; reads persisted artifacts)
+# launch dashboard  — uv run streamlit run src/dashboard/app.py  (D1-D3; reads dashboard_data/)
+# deploy (D4)       — share.streamlit.io -> repo, branch main, main file src/dashboard/app.py
+#                     (host installs requirements.txt (minimal reader deps), reads committed
+#                      dashboard_data/; manual click, needs the owner's GitHub+Streamlit account)
 
 # Env facts (A0): Python 3.11 (uv-managed), Java 17 (Homebrew, for the Spark JVM),
 #   PySpark 4.2, pandas pinned <3.0 (PySpark 4.2 interop). Verify Spark: it starts a
@@ -164,10 +167,11 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   is a PURE READER (imports no LightGBM/harness), so free hosting (D4) works and the shown
 #   coverage IS the backtest's. persist.py refits v2 across the 4 rolling origins, calibrates
 #   conformal (via intervals.calibration_test_split, shared with evaluate_conformal so the split is
-#   one code path), bands the HELD-OUT LATEST origin, writes three files to data/processed/forecast/
-#   (gitignored): forecast_CA_3.parquet (5,600 rows = 200 series x 28d; sales/yhat/lower/upper/
-#   width/scale + dept/cat) + forecast_CA_3.json (model, mode, target vs EMPIRICAL coverage 0.912,
-#   mean width 5.10, origin 2016-04-24, n_series) + quantiles_CA_3.parquet (D2 grid, below).
+#   one code path), bands the HELD-OUT LATEST origin, writes to the COMMITTED dashboard_data/ bundle
+#   (relocated from gitignored data/processed/ at D4): forecast_CA_3.parquet (5,600 rows = 200
+#   series x 28d; sales/yhat/lower/upper/width/scale + dept/cat) + forecast_CA_3.json (model, mode,
+#   target vs EMPIRICAL coverage 0.912, mean width 5.10, origin 2016-04-24, n_series) +
+#   quantiles_CA_3.parquet (D2 grid) + context_CA_3.parquet (D4 pre-origin actuals; see D4 note).
 #   Persists the SAME
 #   fixed 200-series sample (seed 0) as B1-B4 so the sidecar coverage == the documented B4 number
 #   (sample_size=None would forecast the whole store but then the coverage no longer matches).
@@ -197,7 +201,7 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   RMSSE via scale, unit_share sums to 1, tiers partition) + test_persist.py grid schema/monotone.
 # Dashboard D3 (src/causal/persist.py + app.py _causal_panel): the causal layer surfaced — WHY
 #   demand moved. Same persist-then-read: causal/persist.py runs C2 (did) + C2b (replication) + C3
-#   (snap) ONCE offline (~1min) -> data/processed/causal/causal.json (gitignored); app imports NO
+#   (snap) ONCE offline (~1min) -> dashboard_data/causal.json (committed at D4); app imports NO
 #   statsmodels. Numbers are the module outputs verbatim (did.estimate_did/event_study/placebo_test,
 #   replication.replicate+pool, snap.estimate_ladder/placebo/clean_day) + 2 derived: _naive_jump
 #   (treated raw pre/post ratio = the uncontrolled number DiD disciplines down from) & elasticity
@@ -209,6 +213,20 @@ Both a learning exercise and a portfolio piece — the repo must read as product
 #   0 + clean-day corroborates. Charts REBUILT in Altair (not the committed C-figures PNGs) from
 #   the JSON, log points -> % (expm1) for display. Tests: test_causal_persist.py (round-trip,
 #   missing-file error, _naive_jump, _snap_row) — estimators covered by test_did/replication/snap.
+# Dashboard D4 (deploy, $0 Streamlit Community Cloud): made the app a GENUINE pure reader + a
+#   committed data bundle so it deploys. TWO latent bugs fixed: (1) importing forecast/causal.persist
+#   pulled pyspark+lightgbm+mlflow+statsmodels transitively -> moved the heavy build-only imports
+#   INSIDE the build fns (lazy); importing the app now loads NONE of them (test_dashboard_imports.py
+#   asserts it in a clean SUBPROCESS, since the suite loads those libs process-globally). (2) app
+#   read the gitignored feature store live for the D1 context line (absent on host) -> persist.py now
+#   bundles context_CA_3.parquet (last 56d pre-origin actuals/series); app reads that, no feature
+#   store. DATA: artifacts relocated from gitignored data/processed/ to COMMITTED dashboard_data/
+#   (~250KB, 5 files) — the never-commit-data rule is about the DATASET (350MB raw + 59M-row store,
+#   still gitignored); this is tiny model OUTPUT ("ship predictions not training data"). Chose commit
+#   (option A) over GitHub-Release-asset / external-bucket for 250KB. HOST DEPS: requirements.txt =
+#   minimal reader set (streamlit/altair/pandas/numpy/duckdb/pyarrow), NOT pyproject's modelling env
+#   (no Java/Spark on host). .streamlit/config.toml = accent only (theme stays adaptive). The deploy
+#   CLICK is manual (owner's GitHub+Streamlit acct) -> URL goes in E1 README. App is deploy-READY.
 ```
 
 ## Architectural decisions already made (see SPEC.md for rationale)

@@ -1,0 +1,14 @@
+# Minimal runtime for the DEPLOYED dashboard (Streamlit Community Cloud reads this).
+#
+# The app is a pure reader over the committed dashboard_data/ bundle, so the host needs only the
+# read/plot stack — NOT the modelling env in pyproject.toml (pyspark needs Java, lightgbm/
+# statsmodels/mlflow are build-time only). Keeping this list minimal is what makes the $0 deploy
+# fast and reliable. Versions pinned to the local uv.lock for reproducibility.
+#
+# Local development still uses uv (uv sync / uv run); this file is for the host only.
+streamlit==1.63.0
+altair==6.2.2
+pandas==2.3.3
+numpy==2.4.6
+duckdb==1.5.5
+pyarrow==25.0.1

@@ -1,0 +1,8 @@
+# Streamlit config applied locally and on Community Cloud. Theme is left adaptive (the app renders
+# in the viewer's light/dark preference; the chart colors were chosen to read on both), so only the
+# widget accent is pinned to the chart blue for a consistent look.
+[theme]
+primaryColor = "#4c78a8"
+
+[browser]
+gatherUsageStats = false

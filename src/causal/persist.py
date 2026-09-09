@@ -19,13 +19,21 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from src.causal import did, replication, snap
+if TYPE_CHECKING:
+    from src.causal.snap import SnapResult
+
+# The causal estimators (did/replication/snap) pull in statsmodels + DuckDB feature-store passes.
+# They're imported lazily inside the build functions, so importing this module for `load_causal`
+# (what the deployed dashboard does) stays lightweight and pulls in no statsmodels. Tests lock it.
 
 _REPO = Path(__file__).resolve().parents[2]
-CAUSAL_DIR = _REPO / "data" / "processed" / "causal"
+# Committed alongside the forecast bundle (see src/forecast/persist.FORECAST_DIR) — small model
+# output the read-only dashboard reads, not the dataset. Enables $0 hosting.
+CAUSAL_DIR = _REPO / "dashboard_data"
 
 # The price step is a fixed property of the intervention ($3.58 → $2.98), documented in did.py.
 PRICE_CHANGE_PCT = -0.168
@@ -45,6 +53,8 @@ def _naive_jump(panel: pd.DataFrame) -> float:
 
 
 def _build_price_cut() -> dict:
+    from src.causal import did, replication  # heavy (statsmodels); build-time only
+
     weekly = did.load_weekly_panel()
     controls = did.select_controls(weekly)
     panel = did.build_did_panel(weekly, controls)
@@ -100,7 +110,7 @@ def _build_price_cut() -> dict:
     }
 
 
-def _snap_row(r: snap.SnapResult) -> dict:
+def _snap_row(r: SnapResult) -> dict:
     return {
         "label": r.label,
         "lift": r.pct_effect,
@@ -111,6 +121,8 @@ def _snap_row(r: snap.SnapResult) -> dict:
 
 
 def _build_snap() -> dict:
+    from src.causal import snap  # heavy (statsmodels); build-time only
+
     panel = snap.load_daily_panel()
     ladder = snap.estimate_ladder(panel)
     main = next(r for r in ladder if r.label == snap.MAIN_SPEC)

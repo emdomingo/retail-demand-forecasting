@@ -28,36 +28,29 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
+# These four imports pull in NO modelling deps (no lightgbm/mlflow/statsmodels/pyspark) — the
+# heavy build-time code in the persist modules is lazy-imported. The dashboard is a genuine pure
+# reader over the committed dashboard_data/ bundle, which is what lets it deploy to $0 hosting.
 from src.causal.persist import load_causal  # noqa: E402
 from src.forecast.decision import critical_ratio, policy_costs  # noqa: E402
 from src.forecast.persist import load_forecast  # noqa: E402
 from src.query.segments import segment_error, volume_tier_error  # noqa: E402
-from src.query.slices import read_store_slice  # noqa: E402
 
-CONTEXT_DAYS = 56  # actual history shown before the origin (two seasonal cycles of 28)
 DEFAULT_STORE = "CA_3"
 
 
 @st.cache_data(show_spinner=False)
 def _load_artifact(store: str):
-    """Persisted banded forecast + quantile grid + metadata for one store (cached across reruns)."""
+    """Persisted forecast + quantile grid + pre-origin context + metadata (cached across reruns).
+    All of it comes from the committed bundle — no feature store, no model refit."""
     art = load_forecast(store)
-    return art.forecast, art.quantiles, art.meta
+    return art.forecast, art.quantiles, art.context, art.meta
 
 
 @st.cache_data(show_spinner=False)
 def _load_causal():
     """Persisted causal results (C2/C2b DiD + C3 SNAP), cached across reruns."""
     return load_causal()
-
-
-@st.cache_data(show_spinner=False)
-def _load_history(store: str, ids: tuple[str, ...]) -> pd.DataFrame:
-    """Pre-origin actuals for the selected series, via the DuckDB query layer. Reads
-    the whole store slice once (cached) and filters — the ORDER BY date discipline
-    lives in the query layer."""
-    df = read_store_slice(store, columns=["id", "date", "sales"])
-    return df[df["id"].isin(ids)]
 
 
 def _forecast_chart(hist: pd.DataFrame, fc: pd.DataFrame, origin: pd.Timestamp) -> alt.Chart:
@@ -108,7 +101,7 @@ def main() -> None:
 
     store = DEFAULT_STORE
     try:
-        fc_all, quantiles, meta = _load_artifact(store)
+        fc_all, quantiles, context, meta = _load_artifact(store)
     except FileNotFoundError as e:
         st.error(str(e))
         st.stop()
@@ -141,8 +134,9 @@ def main() -> None:
     series = st.selectbox("Series", order, format_func=lambda i: labels[i])
 
     fc = fc_all[fc_all["id"] == series].sort_values("date")
-    hist_all = _load_history(store, (series,))
-    ctx = hist_all[(hist_all["date"] <= origin)].tail(CONTEXT_DAYS)
+    # Pre-origin context comes from the bundle (already the per-series tail up to the origin) — no
+    # feature-store read, so this works on the deployed host where the feature store is absent.
+    ctx = context[context["id"] == series]
     # Bridge the context line into the horizon so the actual line is continuous.
     hist = pd.concat(
         [ctx[["date", "sales"]], fc[["date", "sales"]]], ignore_index=True
